@@ -19,6 +19,7 @@ const _astronomical_pattern =
     r"\bastronomical\b|\bplanet\b|\bMinor planet\b|\bcomet\b|\bastronomy\b|\basteroid\b"i
 
 const _user_agent = "taxodist Julia package/0.6.0"
+const _http_get = Ref{Function}(HTTP.get)
 
 _normalise_space(text) = strip(replace(String(text), r"\s+" => " "))
 
@@ -126,12 +127,12 @@ end
 
 function _request_html(url::AbstractString; verbose::Bool=false)
     try
-        response = HTTP.get(
+        response = _http_get[](
             url,
             ["User-Agent" => _user_agent];
             status_exception=false,
             retry=false,
-            readtimeout=30,
+            request_timeout=30,
         )
         if response.status != 200
             verbose && println("Could not reach Taxonomicon (HTTP $(response.status)).")

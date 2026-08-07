@@ -13,6 +13,7 @@
     @test shared_clades("Alpha", "Beta") == ["Biota", "Animalia", "CladeA"]
     @test shared_clades("Alpha", "Gamma") == ["Biota", "Animalia"]
     @test shared_clades("Alpha", "Missing") === nothing
+    @test compare_lineages("Alpha", "Missing") === nothing
 
     clear_cache()
 end
@@ -24,6 +25,8 @@ end
 
     @test shared_clades("Animal", "Mineral") == String[]
     @test taxo_path("Animal", "Mineral") === nothing
+    disconnected = compare_lineages("Animal", "Mineral")
+    @test disconnected.mrca_depth == 0
 
     clear_cache()
 end
@@ -73,6 +76,10 @@ end
     @test reverse_path.data.node == ["Alpha", "CladeA"]
     @test reverse_path.data.direction == ["a", "mrca"]
 
+    Taxodist._taxodist_cache["id_Missing"] = nothing
+    @test taxo_path("Missing", "Alpha") === nothing
+    @test taxo_path("Alpha", "Missing") === nothing
+
     clear_cache()
 end
 
@@ -88,6 +95,30 @@ end
     @test names(summary) == ["Axis", "Eigenvalue", "Variance_Pct", "Cumulative_Pct"]
     @test summary.Axis == ["PC1", "PC2"]
     @test summary.Cumulative_Pct[end] ≈ 100.0
+
+    @test plot_taxodist_cluster((hclust=nothing, dist=matrix)) === nothing
+    @test plot_taxodist_ord((points=nothing, GOF=nothing)) === nothing
+    @test summary_taxodist_ord((points=nothing, eig=nothing)) === nothing
+    @test summary_taxodist_ord((points=Taxodist.DataFrame(taxon=["A"]), eig=nothing)) === nothing
+
+    no_axes = (points=Taxodist.DataFrame(taxon=["A", "B"]), eig=[0.0, 0.0], GOF=nothing)
+    @test size(summary_taxodist_ord(no_axes)) == (0, 4)
+    @test plot_taxodist_ord(no_axes) === nothing
+
+    one_axis = (
+        points=Taxodist.DataFrame(taxon=["A", "B"], PC1=[-0.5, 0.5]),
+        eig=[1.0, 0.0],
+        GOF=nothing,
+    )
+    @test plot_taxodist_ord(one_axis) !== nothing
+
+    zero_variance = (
+        points=Taxodist.DataFrame(taxon=["A", "B"], PC1=[0.0, 0.0]),
+        eig=[0.0, 0.0],
+        GOF=[NaN, NaN],
+    )
+    zero_summary = summary_taxodist_ord(zero_variance)
+    @test isempty(zero_summary.Axis)
 end
 
 @testset "Taxonomic heatmap" begin

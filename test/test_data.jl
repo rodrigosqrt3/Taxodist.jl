@@ -39,6 +39,27 @@
     @test taxobase.metadata.source == "The Taxonomicon"
 end
 
+@testset "Taxobase conversion helpers" begin
+    object_matrix = Taxodist.JSON3.read("{\"labels\":[\"A\",\"B\"],\"data\":[[0,0.5],[0.5,0]]}")
+    matrix = Taxodist._matrix_from_json(object_matrix, String[])
+    @test matrix.taxa == ["A", "B"]
+    @test matrix[1, 2] == 0.5
+
+    fallback = Taxodist._matrix_from_json([[0, 1], [1, 0]], ["A", "B"])
+    @test fallback.taxa == ["A", "B"]
+    @test_throws ArgumentError Taxodist._matrix_from_json([[0, 1]], ["A", "B"])
+    @test_throws ArgumentError Taxodist._matrix_from_json([[0], [1]], ["A", "B"])
+
+    empty_table = Taxodist._table_from_records(Any[], (:taxon, :distance))
+    @test names(empty_table) == ["taxon", "distance"]
+    @test size(empty_table, 1) == 0
+
+    records = Taxodist.JSON3.read("[{\"taxon\":\"A\"},{}]")
+    table = Taxodist._table_from_records(records, (:taxon, :distance))
+    @test table.taxon == Any["A", nothing]
+    @test table.distance == Any[nothing, nothing]
+end
+
 @testset "Packaged taxobase examples" begin
     taxobase = load_taxobase()
 
