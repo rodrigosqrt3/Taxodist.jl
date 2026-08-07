@@ -1,6 +1,6 @@
 # taxodist <picture><source media="(prefers-color-scheme: dark)" srcset="images/taxodist_dark.png"><source media="(prefers-color-scheme: light)" srcset="images/taxodist_sepia.png"><img alt="taxodist logo" src="images/taxodist_sepia.png" align="right" height="200"></picture>
 
-[![GitHub release](https://img.shields.io/github/v/release/rodrigosqrt3/Taxodist.jl?display_name=tag&sort=semver)](https://github.com/rodrigosqrt3/Taxodist.jl/releases) &nbsp; [![Julia Tests](https://github.com/rodrigosqrt3/Taxodist.jl/actions/workflows/julia.yml/badge.svg)](https://github.com/rodrigosqrt3/Taxodist.jl/actions/workflows/julia.yml) &nbsp; [![codecov](https://codecov.io/gh/rodrigosqrt3/Taxodist.jl/branch/main/graph/badge.svg)](https://app.codecov.io/gh/rodrigosqrt3/Taxodist.jl)
+[![GitHub release](https://img.shields.io/github/v/release/rodrigosqrt3/Taxodist.jl?display_name=tag&sort=semver)](https://github.com/rodrigosqrt3/Taxodist.jl/releases) &nbsp; [![Julia Tests](https://github.com/rodrigosqrt3/taxodist-jl/actions/workflows/julia.yml/badge.svg)](https://github.com/rodrigosqrt3/taxodist-jl/actions/workflows/julia.yml) &nbsp; [![codecov](https://codecov.io/gh/rodrigosqrt3/Taxodist.jl/branch/main/graph/badge.svg)](https://app.codecov.io/gh/rodrigosqrt3/Taxodist.jl)
 
 **Taxonomic hierarchy distance and lineage computation for any taxon on Earth.**
 
