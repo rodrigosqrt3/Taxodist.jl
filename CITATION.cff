@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use Taxodist.jl, please cite the software and The Taxonomicon."
+title: "Taxodist.jl: Taxonomic Hierarchy Distances and Lineage Analysis in Julia"
+type: software
+authors:
+  - family-names: Villa
+    given-names: Rodrigo Fonseca
+    orcid: "https://orcid.org/0009-0005-2938-2270"
+version: 0.6.0
+license: GPL-3.0-or-later
+repository-code: "https://github.com/rodrigosqrt3/Taxodist.jl"
+url: "https://rodrigosqrt3.github.io/taxodist-site"
+keywords:
+  - taxonomy
+  - biodiversity
+  - Julia
+  - distance matrix
+  - lineage analysis

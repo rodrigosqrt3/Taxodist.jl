@@ -1,0 +1,77 @@
+@testset "Lineage comparison and shared clades" begin
+    clear_cache()
+    seed_lineage("Alpha", "1", ["Biota", "Animalia", "CladeA", "Alpha"])
+    seed_lineage("Beta", "2", ["Biota", "Animalia", "CladeA", "Beta"])
+    seed_lineage("Gamma", "3", ["Biota", "Animalia", "CladeB", "Gamma"])
+    Taxodist._taxodist_cache["id_Missing"] = nothing
+
+    comparison = compare_lineages("Alpha", "Beta")
+    @test comparison.lineage_a[end] == "Alpha"
+    @test comparison.lineage_b[end] == "Beta"
+    @test comparison.mrca_depth == 3
+
+    @test shared_clades("Alpha", "Beta") == ["Biota", "Animalia", "CladeA"]
+    @test shared_clades("Alpha", "Gamma") == ["Biota", "Animalia"]
+    @test shared_clades("Alpha", "Missing") === nothing
+
+    clear_cache()
+end
+
+@testset "Disconnected lineage utilities" begin
+    clear_cache()
+    seed_lineage("Animal", "1", ["Biota", "Animalia", "Animal"])
+    seed_lineage("Mineral", "2", ["Mineralia", "Mineral"])
+
+    @test shared_clades("Animal", "Mineral") == String[]
+    @test taxo_path("Animal", "Mineral") === nothing
+
+    clear_cache()
+end
+
+@testset "Clade membership and filtering" begin
+    clear_cache()
+    seed_lineage("Alpha", "1", ["Biota", "Animalia", "Clade (example)", "Species+", "Alpha"])
+    seed_lineage("Beta", "2", ["Biota", "Animalia", "Other", "Beta"])
+    Taxodist._taxodist_cache["id_Missing"] = nothing
+
+    @test is_member("Alpha", "animalia") === true
+    @test is_member("1", "  CLADE (EXAMPLE)  ") === true
+    @test is_member("1", "Species+") === true
+    @test is_member("1", "Clade (") === false
+    @test is_member("Alpha", "Anim") === false
+    @test is_member("Missing", "Animalia") === nothing
+    @test filter_clade(["Alpha", "Beta", "Missing"], "Animalia") == ["Alpha", "Beta"]
+    @test filter_clade(["1", "2", "Missing"], "Clade (example)") == ["1"]
+
+    clear_cache()
+end
+
+@testset "Taxonomic paths" begin
+    clear_cache()
+    seed_lineage("Alpha", "1", ["Biota", "Animalia", "CladeA", "Alpha"])
+    seed_lineage("Gamma", "2", ["Biota", "Animalia", "CladeB", "Gamma"])
+    seed_lineage("CladeA", "3", ["Biota", "Animalia", "CladeA"])
+
+    path = taxo_path("Alpha", "Gamma")
+    @test path.taxon_a == "Alpha"
+    @test path.taxon_b == "Gamma"
+    @test path.data.node == ["Alpha", "CladeA", "Animalia", "CladeB", "Gamma"]
+    @test path.data.depth == [4, 3, 2, 3, 4]
+    @test path.data.direction == ["a", "a", "mrca", "b", "b"]
+    @test count(==("mrca"), path.data.direction) == 1
+
+    identical_path = taxo_path("Alpha", "Alpha")
+    @test size(identical_path.data, 1) == 1
+    @test identical_path.data.node == ["Alpha"]
+    @test identical_path.data.direction == ["mrca"]
+
+    ancestor_path = taxo_path("CladeA", "Alpha")
+    @test ancestor_path.data.node == ["CladeA", "Alpha"]
+    @test ancestor_path.data.direction == ["mrca", "b"]
+
+    reverse_path = taxo_path("Alpha", "CladeA")
+    @test reverse_path.data.node == ["Alpha", "CladeA"]
+    @test reverse_path.data.direction == ["a", "mrca"]
+
+    clear_cache()
+end
