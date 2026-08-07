@@ -12,6 +12,7 @@ end
     matrix = distance_matrix(["Alpha", "Beta", "Gamma"]; progress=false)
 
     @test size(matrix) == (3, 3)
+    @test Base.IndexStyle(TaxonomicDistanceMatrix) == Base.IndexCartesian()
     @test matrix.taxa == ["Alpha", "Beta", "Gamma"]
     @test [matrix[i, i] for i in 1:3] == zeros(3)
     @test matrix["Alpha", "Beta"] == 1 / 3

@@ -41,6 +41,18 @@ function _table_from_records(records, columns)
     return table
 end
 
+function _coverage_table(taxa, coverage_raw)
+    coverage_values = if coverage_raw isa AbstractVector
+        Dict(taxon => value for (taxon, value) in zip(taxa, coverage_raw))
+    else
+        _json_dict(coverage_raw)
+    end
+    return DataFrame(
+        taxon=copy(taxa),
+        covered=[Bool(get(coverage_values, taxon, false)) for taxon in taxa],
+    )
+end
+
 """
     load_taxobase()
 
@@ -64,15 +76,7 @@ function load_taxobase()
     found_taxa = String.(collect(get(data, "found_taxa", taxa)))
 
     coverage_raw = get(data, "coverage", Dict{String,Any}())
-    coverage_values = if coverage_raw isa AbstractVector
-        Dict(taxon => value for (taxon, value) in zip(taxa, coverage_raw))
-    else
-        _json_dict(coverage_raw)
-    end
-    coverage = DataFrame(
-        taxon=copy(taxa),
-        covered=[Bool(get(coverage_values, taxon, false)) for taxon in taxa],
-    )
+    coverage = _coverage_table(taxa, coverage_raw)
 
     matrix = _matrix_from_json(get(data, "matrix", Any[]), found_taxa)
 

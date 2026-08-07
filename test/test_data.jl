@@ -58,6 +58,10 @@ end
     table = Taxodist._table_from_records(records, (:taxon, :distance))
     @test table.taxon == Any["A", nothing]
     @test table.distance == Any[nothing, nothing]
+
+    vector_coverage = Taxodist._coverage_table(["A", "B"], [true, false])
+    @test vector_coverage.taxon == ["A", "B"]
+    @test vector_coverage.covered == [true, false]
 end
 
 @testset "Packaged taxobase examples" begin
