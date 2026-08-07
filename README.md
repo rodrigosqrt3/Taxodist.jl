@@ -1,118 +1,80 @@
-# Taxodist.jl <picture><source media="(prefers-color-scheme: dark)" srcset="images/taxodist_dark.png"><source media="(prefers-color-scheme: light)" srcset="images/taxodist_sepia.png"><img alt="taxodist logo" src="images/taxodist_sepia.png" align="right" height="200"></picture>
+# taxodist <picture><source media="(prefers-color-scheme: dark)" srcset="images/taxodist_dark.png"><source media="(prefers-color-scheme: light)" srcset="images/taxodist_sepia.png"><img alt="taxodist logo" src="images/taxodist_sepia.png" align="right" height="200"></picture>
 
-[![Julia](https://img.shields.io/badge/Julia-1.10%2B-9558B2?logo=julia)](https://julialang.org/) &nbsp; [![CI](https://github.com/rodrigosqrt3/Taxodist.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/rodrigosqrt3/Taxodist.jl/actions/workflows/CI.yml) &nbsp; [![codecov](https://codecov.io/gh/rodrigosqrt3/Taxodist.jl/branch/main/graph/badge.svg)](https://app.codecov.io/gh/rodrigosqrt3/Taxodist.jl) &nbsp; [![License: GPL v3+](https://img.shields.io/badge/License-GPL_v3%2B-blue.svg)](LICENSE.md)
+[![GitHub release](https://img.shields.io/github/v/release/rodrigosqrt3/Taxodist.jl?display_name=tag&sort=semver)](https://github.com/rodrigosqrt3/Taxodist.jl/releases) &nbsp; [![Julia Tests](https://github.com/rodrigosqrt3/Taxodist.jl/actions/workflows/julia.yml/badge.svg)](https://github.com/rodrigosqrt3/Taxodist.jl/actions/workflows/julia.yml) &nbsp; [![codecov](https://codecov.io/gh/rodrigosqrt3/Taxodist.jl/branch/main/graph/badge.svg)](https://app.codecov.io/gh/rodrigosqrt3/Taxodist.jl)
 
-**Taxonomic hierarchy distances derived from lineage classifications.**
+**Taxonomic hierarchy distance and lineage computation for any taxon on Earth.**
 
-Julia implementation of `taxodist`, a package for taxonomic hierarchy
-distances and lineage analysis using ordered classifications retrieved from
-The Taxonomicon. The Julia, R, and Python implementations share the same
-distance definition and lineage semantics.
-
-Development is currently focused on complete behavioral parity with the R and
-Python implementations. The Julia package will not be registered until its
-public API, edge-case behavior, reference data, and tests satisfy the shared
-compatibility contract.
+`Taxodist.jl` retrieves full hierarchical lineages from [The Taxonomicon](http://taxonomicon.taxonomy.nl) and computes an ultrametric distance between any two taxa: a pair of dinosaurs, a dinosaur and a fungus, two species of fly, or an oak tree and a human.
 
 ## Installation
-
-Until registration in Julia's General Registry, install the development
-version directly from GitHub:
 
 ```julia
 using Pkg
 Pkg.add(url="https://github.com/rodrigosqrt3/Taxodist.jl")
 ```
 
-## Distance definition
-
-For two ordered lineages, the most recent common ancestor is the final node in
-their continuous common prefix. The distance is defined as
-
-```math
-d(A,B)=
-\begin{cases}
-0, & L_A=L_B, \\
-\dfrac{1}{\operatorname{depth}(\operatorname{MRCA}(A,B))}, & L_A\neq L_B.
-\end{cases}
-```
-
-Lineages without a shared root have infinite distance. The values represent
-classification depth, not evolutionary time or phylogenetic branch length.
-
-## Current API
-
-The current development version includes:
-
-- taxon search and lineage retrieval from The Taxonomicon;
-- validated in-memory and JSON cache management;
-- pairwise distances and most recent common ancestors;
-- labeled distance matrices;
-- focal distances, closest-relative searches, lineage depth, and coverage
-  checks;
-- lineage comparison, shared-clade queries, membership filtering, and full
-  paths through the MRCA.
+## Basic usage
 
 ```julia
 using Taxodist
 
-lineage = get_lineage("Carnotaurus")
-comparison = taxo_distance("Carnotaurus", "Tyrannosaurus")
+# Get a full lineage
+get_lineage("Tyrannosaurus")
 
-taxa = ["Carnotaurus", "Tyrannosaurus", "Triceratops"]
-matrix = distance_matrix(taxa)
-matrix["Carnotaurus", "Tyrannosaurus"]
+# Distance between two taxa
+taxo_distance("Tyrannosaurus", "Velociraptor")
 
-closest_relative("Carnotaurus", ["Tyrannosaurus", "Triceratops"])
-focal_distances("Carnotaurus", taxa)
+# Most recent common ancestor
+mrca("Tyrannosaurus", "Triceratops")  # "Dinosauria"
+mrca("Tyrannosaurus", "Homo")         # "Amniota"
 
-shared_clades("Carnotaurus", "Tyrannosaurus")
-is_member("Carnotaurus", "Theropoda")
-taxo_path("Carnotaurus", "Triceratops").data
+# Pairwise distance matrix
+theropods = ["Tyrannosaurus", "Velociraptor", "Spinosaurus", "Allosaurus"]
+distance_matrix(theropods)
+
+# Filter taxa by clade
+taxa = ["Tyrannosaurus", "Triceratops", "Homo", "Quercus"]
+filter_clade(taxa, "Dinosauria")
+
+# Get the path between two taxa
+taxo_path("Tyrannosaurus", "Velociraptor")
+
+# Save and restore the lineage cache across sessions
+save_cache("my_cache.json")
+load_cache("my_cache.json")
 ```
 
-## Development
+## The distance metric
 
-From a system terminal opened in the package directory:
+`Taxodist.jl` measures relatedness by asking a single question: how deep is the most recent common ancestor (MRCA)?
 
-```bash
-julia --project=. -e "using Pkg; Pkg.test()"
-```
+$$
+d(A,B) =
+\begin{cases}
+0, & A = B, \\
+\dfrac{1}{\text{depth}(\text{MRCA}(A,B))}, & A \ne B.
+\end{cases}
+$$
 
-Alternatively, from inside the Julia REPL:
+The deeper the shared ancestor, the smaller the distance and the more related the two taxa are. A shallow MRCA means the two taxa diverged early; a deep MRCA means they share a long common history. Zero is reserved for identical hierarchy nodes. Consequently, a taxon and one of its descendants have a positive distance even though they are connected by ancestry. This distinction makes the measure a proper ultrametric on each connected hierarchy.
 
-```julia
-using Pkg
-cd("path/to/taxodist-jl")
-Pkg.activate(".")
-Pkg.test()
-```
+Distance and membership answer different questions. For example, *Tyrannosaurus* has a positive distance from *Dinosauria* because they are distinct nodes, while `is_member("Tyrannosaurus", "Dinosauria")` returns `true`. Use `is_member()` or `taxo_path()` when the relationship of interest is containment or ancestry.
 
-Continuous integration runs the complete test suite on Linux, macOS, and
-Windows with Julia 1.10 and the latest stable Julia release. Coverage from the
-Linux job is reported to Codecov.
+The Taxonomicon provides substantially deeper lineage resolution than other programmatic sources, e.g., *Tyrannosaurus* has over 70 nodes in its lineage, which is what makes the distances meaningful across all of life.
 
-## Status
+## Caching
 
-Retrieval, cache management, the distance kernel, labeled matrices,
-multi-taxon helpers, and lineage utilities are implemented with offline
-tests. Statistical analysis helpers, visualization, packaged reference data,
-and release infrastructure are being ported incrementally.
+Lineages are cached in memory automatically during a session. To persist the
+cache across sessions and avoid redundant network requests, use
+`save_cache("file.json")` and `load_cache("file.json")`.
 
-## Related projects
+## Data source
 
-- [R package](https://github.com/rodrigosqrt3/taxodist)
-- [Python package](https://github.com/rodrigosqrt3/taxodist-py)
-- [Documentation website](https://rodrigosqrt3.github.io/taxodist-site)
+All lineage data is sourced from **The Taxonomicon** (taxonomy.nl), based on *Systema Naturae 2000* by Sheila J. Brands (1989 onwards). Please cite this resource in any published work using `Taxodist.jl`:
 
-## Data source and citation
+> Brands, S.J. (1989 onwards). *Systema Naturae 2000*. Amsterdam, The Netherlands. Retrieved from The Taxonomicon, http://taxonomicon.taxonomy.nl.
 
-Retrieved lineage data originate from **The Taxonomicon**, based on *Systema
-Naturae 2000*. Published analyses should cite both the software and the
-underlying classification source. Citation metadata are provided in
-`CITATION.cff`.
+## Contributing
 
-## License
-
-Taxodist.jl is distributed under the GNU General Public License version 3 or
-later.
+Found a taxon with an incorrect lineage? Please [open an issue](https://github.com/rodrigosqrt3/Taxodist.jl/issues),
+lineage corrections are the most valuable contribution to this package.
