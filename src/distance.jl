@@ -297,3 +297,126 @@ function check_coverage(taxa::AbstractVector; verbose::Bool=false)
     end
     return result
 end
+
+function _analysis_matrix(input; kwargs...)
+    if input isa TaxonomicDistanceMatrix
+        return input
+    end
+    input isa AbstractVector || throw(ArgumentError(
+        "Expected a vector of taxon names or a TaxonomicDistanceMatrix.",
+    ))
+    return distance_matrix(input; kwargs...)
+end
+
+function _invalid_matrix_reason(matrix::TaxonomicDistanceMatrix)
+    values = matrix.values
+    any(isnan, values) && return :nan
+    any(value -> !isfinite(value), values) && return :infinite
+    return nothing
+end
+
+"""
+    taxo_cluster(taxa; method="average", kwargs...)
+
+Compute a taxonomic distance matrix and perform hierarchical clustering.
+`taxa` may also be an existing `TaxonomicDistanceMatrix`.
+"""
+function taxo_cluster(taxa; method="average", kwargs...)
+    matrix = _analysis_matrix(taxa; kwargs...)
+    linkage = Symbol(lowercase(String(method)))
+    valid_linkages = (:single, :average, :complete, :ward, :ward_presquared)
+    linkage in valid_linkages || throw(ArgumentError(
+        "Unsupported clustering method: $(repr(method)).",
+    ))
+
+    reason = _invalid_matrix_reason(matrix)
+    if reason === :nan
+        @warn "Distance matrix contains NaN values (taxa not found or server offline). Clustering skipped."
+        return (hclust=nothing, dist=matrix, method=linkage)
+    elseif reason === :infinite
+        @warn "Distance matrix contains infinite values (no shared ancestor). Clustering skipped."
+        return (hclust=nothing, dist=matrix, method=linkage)
+    elseif size(matrix, 1) < 2
+        @warn "At least two taxa are required for clustering. Clustering skipped."
+        return (hclust=nothing, dist=matrix, method=linkage)
+    end
+
+    result = Clustering.hclust(
+        Matrix(matrix);
+        linkage=linkage,
+        branchorder=:r,
+    )
+    return (hclust=result, dist=matrix, method=linkage)
+end
+
+function _pcoa(matrix::TaxonomicDistanceMatrix, k::Int)
+    values = matrix.values
+    n_taxa = size(values, 1)
+    centering = Matrix{Float64}(I, n_taxa, n_taxa) .- (1.0 / n_taxa)
+    gram = centering * (-0.5 .* values .^ 2) * centering
+    decomposition = eigen(Symmetric(gram))
+    order = sortperm(decomposition.values; rev=true)
+    eigenvalues = decomposition.values[order]
+    eigenvectors = decomposition.vectors[:, order]
+
+    selected = eigenvalues[1:k]
+    positive = findall(>(0.0), selected)
+    if length(positive) < k
+        @warn "Only $(length(positive)) of the first $(k) eigenvalues are positive."
+    end
+
+    retained_values = selected[positive]
+    retained_vectors = eigenvectors[:, positive]
+    coordinates = retained_vectors .* reshape(sqrt.(retained_values), 1, :)
+
+    numerator = sum(retained_values)
+    absolute_total = sum(abs, eigenvalues)
+    positive_total = sum(max(value, 0.0) for value in eigenvalues)
+    gof = [
+        absolute_total > 0 ? numerator / absolute_total : NaN,
+        positive_total > 0 ? numerator / positive_total : NaN,
+    ]
+
+    return coordinates, eigenvalues, gof
+end
+
+"""
+    taxo_ordinate(taxa; k=2, kwargs...)
+
+Apply principal coordinates analysis (classical multidimensional scaling) to
+a taxonomic distance matrix.
+"""
+function taxo_ordinate(taxa; k=2, kwargs...)
+    matrix = _analysis_matrix(taxa; kwargs...)
+    reason = _invalid_matrix_reason(matrix)
+    if reason === :nan
+        @warn "Distance matrix contains NaN values. Ordination skipped."
+        return (points=nothing, dist=matrix, GOF=nothing, eig=nothing)
+    elseif reason === :infinite
+        @warn "Distance matrix contains infinite values (no shared ancestor). Ordination skipped."
+        return (points=nothing, dist=matrix, GOF=nothing, eig=nothing)
+    end
+
+    n_taxa = size(matrix, 1)
+    if n_taxa < 2
+        @warn "At least two taxa are required for ordination. Ordination skipped."
+        return (points=nothing, dist=matrix, GOF=nothing, eig=nothing)
+    end
+
+    valid_k = k isa Real && !(k isa Bool) && isfinite(k) && k >= 1 && k == floor(k)
+    valid_k || throw(ArgumentError("`k` must be a single positive integer."))
+    dimensions = Int(k)
+    maximum_dimensions = n_taxa - 1
+    if dimensions > maximum_dimensions
+        @warn "`k` reduced from $(dimensions) to $(maximum_dimensions), the maximum for $(n_taxa) taxa."
+        dimensions = maximum_dimensions
+    end
+
+    coordinates, eigenvalues, gof = _pcoa(matrix, dimensions)
+    points = DataFrame(taxon=copy(matrix.taxa))
+    for axis in axes(coordinates, 2)
+        points[!, Symbol("PC$(axis)")] = coordinates[:, axis]
+    end
+
+    return (points=points, dist=matrix, GOF=gof, eig=eigenvalues)
+end

@@ -131,7 +131,7 @@ function _request_html(url::AbstractString; verbose::Bool=false)
             ["User-Agent" => _user_agent];
             status_exception=false,
             retry=false,
-            request_timeout=30,
+            readtimeout=30,
         )
         if response.status != 200
             verbose && println("Could not reach Taxonomicon (HTTP $(response.status)).")

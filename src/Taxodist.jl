@@ -1,10 +1,13 @@
 module Taxodist
 
 using Cascadia
+using Clustering
 using DataFrames
 using Gumbo
 using HTTP
 using JSON3
+using LinearAlgebra
+using Plots
 
 export clear_cache,
        save_cache,
@@ -26,10 +29,18 @@ export clear_cache,
        shared_clades,
        is_member,
        filter_clade,
-       taxo_path
+       taxo_path,
+       taxo_cluster,
+       taxo_ordinate,
+       taxo_heatmap,
+       plot_taxodist_cluster,
+       plot_taxodist_ord,
+       summary_taxodist_ord,
+       load_taxobase
 
 include("fetch.jl")
 include("distance.jl")
-include("utilities.jl")
+include("utils.jl")
+include("data.jl")
 
 end

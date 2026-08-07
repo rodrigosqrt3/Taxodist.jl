@@ -65,3 +65,64 @@ end
 
     clear_cache()
 end
+
+function example_analysis_matrix()
+    return TaxonomicDistanceMatrix(
+        [
+            0.0 0.2 0.5
+            0.2 0.0 0.3
+            0.5 0.3 0.0
+        ],
+        ["A", "B", "C"],
+    )
+end
+
+@testset "Hierarchical clustering" begin
+    matrix = example_analysis_matrix()
+    result = taxo_cluster(matrix)
+
+    @test result.hclust !== nothing
+    @test result.dist === matrix
+    @test result.method == :average
+    @test length(result.hclust.order) == 3
+    @test sort(result.hclust.order) == [1, 2, 3]
+
+    singleton = TaxonomicDistanceMatrix(zeros(1, 1), ["A"])
+    @test taxo_cluster(singleton).hclust === nothing
+
+    missing_matrix = TaxonomicDistanceMatrix([0.0 NaN; NaN 0.0], ["A", "B"])
+    @test taxo_cluster(missing_matrix).hclust === nothing
+
+    infinite_matrix = TaxonomicDistanceMatrix([0.0 Inf; Inf 0.0], ["A", "B"])
+    @test taxo_cluster(infinite_matrix).hclust === nothing
+    @test_throws ArgumentError taxo_cluster(matrix; method="unknown")
+end
+
+@testset "Principal coordinates analysis" begin
+    matrix = example_analysis_matrix()
+    result = taxo_ordinate(matrix; k=2)
+
+    @test result.points !== nothing
+    @test result.dist === matrix
+    @test size(result.points) == (3, 3)
+    @test names(result.points) == ["taxon", "PC1", "PC2"]
+    @test result.points.taxon == ["A", "B", "C"]
+    @test length(result.GOF) == 2
+    @test length(result.eig) == 3
+
+    two_taxa = TaxonomicDistanceMatrix([0.0 0.5; 0.5 0.0], ["A", "B"])
+    reduced = taxo_ordinate(two_taxa; k=2)
+    @test names(reduced.points) == ["taxon", "PC1"]
+
+    @test_throws ArgumentError taxo_ordinate(matrix; k=0)
+    @test_throws ArgumentError taxo_ordinate(matrix; k=1.5)
+
+    singleton = TaxonomicDistanceMatrix(zeros(1, 1), ["A"])
+    @test taxo_ordinate(singleton).points === nothing
+
+    missing_matrix = TaxonomicDistanceMatrix([0.0 NaN; NaN 0.0], ["A", "B"])
+    @test taxo_ordinate(missing_matrix).points === nothing
+
+    infinite_matrix = TaxonomicDistanceMatrix([0.0 Inf; Inf 0.0], ["A", "B"])
+    @test taxo_ordinate(infinite_matrix).points === nothing
+end
