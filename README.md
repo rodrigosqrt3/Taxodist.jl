@@ -1,6 +1,6 @@
 # taxodist <picture><source media="(prefers-color-scheme: dark)" srcset="images/taxodist_dark.png"><source media="(prefers-color-scheme: light)" srcset="images/taxodist_sepia.png"><img alt="taxodist logo" src="images/taxodist_sepia.png" align="right" height="200"></picture>
 
-[![version](https://juliahub.com/docs/Taxodist/version.svg)](https://juliahub.com/ui/Packages/General/Taxodist/) &nbsp; [![Julia Tests](https://github.com/rodrigosqrt3/Taxodist.jl/actions/workflows/julia.yml/badge.svg)](https://github.com/rodrigosqrt3/Taxodist.jl/actions/workflows/julia.yml) &nbsp; [![codecov](https://codecov.io/gh/rodrigosqrt3/Taxodist.jl/branch/main/graph/badge.svg)](https://app.codecov.io/gh/rodrigosqrt3/Taxodist.jl)
+[![version](https://juliahub.com/docs/Taxodist/version.svg)](https://juliahub.com/ui/Packages/General/Taxodist/) &nbsp; [![Julia Tests](https://github.com/rodrigosqrt3/taxodist-jl/actions/workflows/julia.yml/badge.svg)](https://github.com/rodrigosqrt3/taxodist-jl/actions/workflows/julia.yml) &nbsp; [![codecov](https://codecov.io/gh/rodrigosqrt3/Taxodist.jl/branch/main/graph/badge.svg)](https://app.codecov.io/gh/rodrigosqrt3/Taxodist.jl)
 
 **Taxonomic hierarchy distance and lineage computation for any taxon on Earth.**
 
