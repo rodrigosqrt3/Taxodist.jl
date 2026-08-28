@@ -1,7 +1,7 @@
 name = "Taxodist"
 uuid = "2a6cfb44-98ac-4197-aa53-d0b51c850e65"
 authors = ["Rodrigo Fonseca Villa <rodrigo03.villa@gmail.com>"]
-version = "0.6.0"
+version = "0.7.0"
 
 [deps]
 Cascadia = "54eefc05-d75b-58de-a785-1a3403f0919f"

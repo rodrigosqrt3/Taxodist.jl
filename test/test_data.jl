@@ -34,7 +34,7 @@
     @test all(taxobase.statistical_matrix[i, i] == 0.0 for i in 1:15)
     @test all(isfinite, taxobase.statistical_matrix.values)
 
-    @test taxobase.metadata.package_version == "0.6.0"
+    @test taxobase.metadata.package_version == "0.7.0"
     @test taxobase.metadata.generated_on == "2026-08-06"
     @test taxobase.metadata.source == "The Taxonomicon"
 end

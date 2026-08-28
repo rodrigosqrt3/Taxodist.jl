@@ -48,6 +48,19 @@ end
     @test result.mrca_depth == 0
 end
 
+@testset "Numeric matrix distance path" begin
+    cases = [
+        (["Biota", "Animalia"], ["Biota", "Animalia"]),
+        (["Biota", "Animalia"], ["Biota", "Animalia", "Taxon"]),
+        (["Biota", "Animalia", "A"], ["Biota", "Plantae", "B"]),
+        (["Biota", "Animalia"], ["Natura", "Mineralia"]),
+    ]
+    for (lineage_a, lineage_b) in cases
+        @test Taxodist._distance_value(lineage_a, lineage_b) ==
+              Taxodist._compute_distance(lineage_a, lineage_b).distance
+    end
+end
+
 @testset "Symmetry and ultrametricity" begin
     lineage_a = ["Biota", "Animalia", "Dinosauria", "Theropoda", "A"]
     lineage_b = ["Biota", "Animalia", "Dinosauria", "Theropoda", "B"]

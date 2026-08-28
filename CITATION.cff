@@ -6,10 +6,10 @@ authors:
   - family-names: Villa
     given-names: Rodrigo Fonseca
     orcid: "https://orcid.org/0009-0005-2938-2270"
-version: 0.6.0
+version: 0.7.0
 license: GPL-3.0-or-later
-repository-code: "https://github.com/rodrigosqrt3/Taxodist.jl"
-url: "https://rodrigosqrt3.github.io/taxodist-site"
+repository-code: "https://github.com/rodrigosqrt3/taxodist-jl"
+url: "https://rodrigosqrt3.github.io/taxodist-web/"
 keywords:
   - taxonomy
   - biodiversity

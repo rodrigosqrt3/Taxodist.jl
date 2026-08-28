@@ -1,0 +1,161 @@
+       35 _json_dict(value) = Dict(String(key) => item for (key, item) in pairs(value))
+        - 
+        8 function _matrix_from_json(value, fallback_labels)
+       16     labels = String.(fallback_labels)
+        8     rows = value
+        - 
+        8     if value isa JSON3.Object
+        5         object = _json_dict(value)
+        5         labels = String.(collect(get(object, "labels", fallback_labels)))
+        5         rows = get(object, "data", Any[])
+        -     end
+        - 
+        8     n_labels = length(labels)
+        8     matrix = Matrix{Float64}(undef, n_labels, n_labels)
+       11     collected_rows = collect(rows)
+        9     length(collected_rows) == n_labels || throw(ArgumentError(
+        -         "Invalid taxobase matrix: row count does not match its labels.",
+        -     ))
+        - 
+        7     for row_index in 1:n_labels
+      142         row = collect(collected_rows[row_index])
+      140         length(row) == n_labels || throw(ArgumentError(
+        -             "Invalid taxobase matrix: column count does not match its labels.",
+        -         ))
+      138         matrix[row_index, :] = Float64.(row)
+      139     end
+        - 
+        6     return TaxonomicDistanceMatrix(matrix, labels)
+        - end
+        - 
+        6 function _table_from_records(records, columns)
+        6     table = DataFrame()
+        6     for column in columns
+       12         table[!, column] = Any[]
+       18     end
+        - 
+       11     for record in records
+       22         values = _json_dict(record)
+       43         push!(table, (; (column => get(values, String(column), nothing) for column in columns)...))
+       39     end
+        6     return table
+        - end
+        - 
+        3 function _coverage_table(taxa, coverage_raw)
+        3     coverage_values = if coverage_raw isa AbstractVector
+        1         Dict(taxon => value for (taxon, value) in zip(taxa, coverage_raw))
+        -     else
+        2         _json_dict(coverage_raw)
+        -     end
+        3     return DataFrame(
+        -         taxon=copy(taxa),
+        -         covered=[Bool(get(coverage_values, taxon, false)) for taxon in taxa],
+        -     )
+        - end
+        - 
+        - """
+        -     load_taxobase()
+        - 
+        - Load the packaged offline reference dataset exported from the R `taxobase`
+        - object. The result contains the same taxa, matrices, examples, search output,
+        - and provenance metadata used by the R and Python implementations.
+        - """
+        2 function load_taxobase()
+        2     path = joinpath(@__DIR__, "data", "taxobase.json")
+        2     isfile(path) || throw(ArgumentError(
+        -         "Packaged taxobase file not found at $(repr(path)).",
+        -     ))
+        - 
+        2     raw = JSON3.read(read(path, String))
+        2     raw isa JSON3.Object || throw(ArgumentError(
+        -         "Invalid taxobase file: expected a JSON object.",
+        -     ))
+        2     data = _json_dict(raw)
+        - 
+        2     taxa = String.(collect(get(data, "taxa", Any[])))
+        2     found_taxa = String.(collect(get(data, "found_taxa", taxa)))
+        - 
+        2     coverage_raw = get(data, "coverage", Dict{String,Any}())
+        2     coverage = _coverage_table(taxa, coverage_raw)
+        - 
+        2     matrix = _matrix_from_json(get(data, "matrix", Any[]), found_taxa)
+        - 
+        2     pairwise_values = _json_dict(get(
+        -         data,
+        -         "pairwise",
+        -         Dict{String,Any}(),
+        -     ))
+        2     pairwise = (
+        -         distance=Float64(get(pairwise_values, "distance", NaN)),
+        -         mrca=String(get(pairwise_values, "mrca", "")),
+        -         mrca_depth=Int(get(pairwise_values, "mrca_depth", 0)),
+        -         depth_a=Int(get(pairwise_values, "depth_a", 0)),
+        -         depth_b=Int(get(pairwise_values, "depth_b", 0)),
+        -         taxon_a=String(get(pairwise_values, "taxon_a", "")),
+        -         taxon_b=String(get(pairwise_values, "taxon_b", "")),
+        -     )
+        - 
+        2     lineage_homo = String.(collect(get(data, "lineage_homo", Any[])))
+        2     lineage_tyrannosaurus = String.(collect(
+        -         get(data, "lineage_tyrannosaurus", Any[]),
+        -     ))
+        - 
+        2     closest = _table_from_records(
+        -         get(data, "closest", Any[]),
+        -         (:taxon, :distance),
+        -     )
+        2     closest.taxon = String.(closest.taxon)
+        2     closest.distance = Float64.(closest.distance)
+        - 
+        2     filtered = String.(collect(get(data, "filter", Any[])))
+        - 
+        2     search = _table_from_records(
+        -         get(data, "search", Any[]),
+        -         (:id, :name),
+        -     )
+        2     search.id = String.(search.id)
+        2     search.name = String.(search.name)
+        - 
+        2     statistical_taxa = String.(collect(get(data, "statistical_taxa", Any[])))
+        2     statistical_matrix = _matrix_from_json(
+        -         get(data, "statistical_matrix", Any[]),
+        -         statistical_taxa,
+        -     )
+        - 
+        2     metadata_values = _json_dict(get(
+        -         data,
+        -         "metadata",
+        -         Dict{String,Any}(),
+        -     ))
+        2     metadata = (
+        -         source=String(get(metadata_values, "source", "The Taxonomicon")),
+        -         source_url=String(get(
+        -             metadata_values,
+        -             "source_url",
+        -             "http://taxonomicon.taxonomy.nl",
+        -         )),
+        -         generated_on=String(get(metadata_values, "generated_on", "")),
+        -         package_version=String(get(metadata_values, "package_version", "legacy")),
+        -         distance_definition=String(get(
+        -             metadata_values,
+        -             "distance_definition",
+        -             "legacy packaged data",
+        -         )),
+        -     )
+        - 
+        2     return (
+        -         taxa=taxa,
+        -         found_taxa=found_taxa,
+        -         coverage=coverage,
+        -         matrix=matrix,
+        -         pairwise=pairwise,
+        -         lineage_homo=lineage_homo,
+        -         lineage_tyrannosaurus=lineage_tyrannosaurus,
+        -         closest=closest,
+        -         filter=filtered,
+        -         search=search,
+        -         statistical_taxa=statistical_taxa,
+        -         statistical_matrix=statistical_matrix,
+        -         metadata=metadata,
+        -     )
+        - end

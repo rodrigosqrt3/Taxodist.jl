@@ -96,13 +96,42 @@ end
     <a href="TaxonTree.aspx?id=6">Target</a>
     """
     @test Taxodist._parse_lineage_html(noisy, "6") == ["Biota", "Alpha", "Target"]
+
+    # Real Taxonomicon pages expose hierarchy information in the complete
+    # content text; some intermediate nodes are plain text rather than links.
+    structured = """
+    <html><body>
+      <div id="ctl00_divSubject"><b>Carnotaurus</b></div>
+      <div id="divPageContent">
+        <div>Natura</div>
+        <div>Biota</div>
+        <div>Kingdom Animalia</div>
+        <div>Clade Dinosauria</div>
+        <div>Clade Neotheropoda</div>
+        <div><a href="TaxonTree.aspx?id=99">Genus Carnotaurus</a></div>
+        <div>Child taxon that must be excluded</div>
+      </div>
+    </body></html>
+    """
+    @test Taxodist._parse_lineage_html(structured, "99") == [
+        "Biota", "Animalia", "Dinosauria", "Neotheropoda", "Carnotaurus",
+    ]
+
+    @test Taxodist._contains_distinct_word("Genus Gallus Brisson", "Gallus")
+    @test !Taxodist._contains_distinct_word("Gallusian clade", "Gallus")
+
+    # NullNode is the third concrete HTMLNode type in Gumbo. It carries no
+    # text, so the generic structured-text fallback must ignore it.
+    io = IOBuffer()
+    @test isnothing(Taxodist._write_structured_text(io, Taxodist.Gumbo.NullNode()))
+    @test isempty(String(take!(io)))
 end
 
 @testset "HTTP request handling" begin
     original = Taxodist._http_get[]
     try
         function mock_ok(url, headers; kwargs...)
-            @test headers == ["User-Agent" => "taxodist Julia package/0.6.0"]
+            @test headers == ["User-Agent" => "taxodist Julia package/0.7.0"]
             @test kwargs[:status_exception] === false
             @test kwargs[:retry] === false
             @test kwargs[:request_timeout] == 30
@@ -279,7 +308,30 @@ end
     @test_throws ArgumentError Taxodist._validated_cache(Dict("id_A" => ""))
     @test_throws ArgumentError Taxodist._validated_cache(Dict("lin_1" => "Biota"))
     @test_throws ArgumentError Taxodist._validated_cache(Dict("lin_1" => Any["Biota", 1]))
+    @test_throws ArgumentError Taxodist._validated_cache(
+        Dict("resolved_lineage_1_A" => Any["Biota", 1]),
+    )
+    valid_resolved = Taxodist._validated_cache(
+        Dict("resolved_lineage_1_A" => AbstractString["Biota", "Animalia", "A"]),
+    )
+    @test valid_resolved["resolved_lineage_1_A"] == ["Biota", "Animalia", "A"]
+    @test valid_resolved["resolved_lineage_1_A"] isa Vector{String}
     @test Taxodist._validated_cache(Dict("other" => 1))["other"] == 1
 
     Taxodist.clear_cache()
+end
+
+@testset "Final resolved lineage cache" begin
+    clear_cache()
+    Taxodist._taxodist_cache["id_Alpha"] = "20"
+    Taxodist._taxodist_cache["lin_20"] = ["Biota", "Animalia", "Alpha"]
+
+    first = get_lineage("Alpha")
+    Taxodist._taxodist_cache["lin_20"] = ["Biota", "Changed", "Alpha"]
+    second = get_lineage("Alpha")
+
+    @test first == ["Biota", "Animalia", "Alpha"]
+    @test second == first
+    @test haskey(Taxodist._taxodist_cache, "resolved_lineage_1_Alpha")
+    clear_cache()
 end

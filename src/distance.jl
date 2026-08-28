@@ -1,3 +1,19 @@
+function _common_prefix_depth(lineage_a, lineage_b)
+    depth = 0
+    for (node_a, node_b) in zip(lineage_a, lineage_b)
+        node_a == node_b || break
+        depth += 1
+    end
+    return depth
+end
+
+function _distance_value(lineage_a, lineage_b)
+    mrca_depth = _common_prefix_depth(lineage_a, lineage_b)
+    mrca_depth == 0 && return Inf
+    length(lineage_a) == length(lineage_b) == mrca_depth && return 0.0
+    return 1.0 / mrca_depth
+end
+
 """
     _compute_distance(lineage_a, lineage_b; taxon_a="A", taxon_b="B")
 
@@ -12,12 +28,7 @@ function _compute_distance(
 )
     depth_a = length(lineage_a)
     depth_b = length(lineage_b)
-    mrca_depth = 0
-
-    for (node_a, node_b) in zip(lineage_a, lineage_b)
-        node_a == node_b || break
-        mrca_depth += 1
-    end
+    mrca_depth = _common_prefix_depth(lineage_a, lineage_b)
 
     if mrca_depth == 0
         return (
@@ -32,7 +43,7 @@ function _compute_distance(
     end
 
     return (
-        distance=lineage_a == lineage_b ? 0.0 : 1.0 / mrca_depth,
+        distance=(depth_a == depth_b == mrca_depth) ? 0.0 : 1.0 / mrca_depth,
         mrca=String(lineage_a[mrca_depth]),
         mrca_depth=mrca_depth,
         depth_a=depth_a,
@@ -166,12 +177,7 @@ function distance_matrix(
             lineage_i = lineages[i]
             lineage_j = lineages[j]
             if lineage_i !== nothing && lineage_j !== nothing
-                value = _compute_distance(
-                    lineage_i,
-                    lineage_j;
-                    taxon_a=labels[i],
-                    taxon_b=labels[j],
-                ).distance
+                value = _distance_value(lineage_i, lineage_j)
                 values[i, j] = value
                 values[j, i] = value
             end

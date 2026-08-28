@@ -18,10 +18,55 @@ const _bare_ranks = Set([
 const _astronomical_pattern =
     r"\bastronomical\b|\bplanet\b|\bMinor planet\b|\bcomet\b|\bastronomy\b|\basteroid\b"i
 
-const _user_agent = "taxodist Julia package/0.6.0"
+const _user_agent = "taxodist Julia package/0.7.0"
 const _http_get = Ref{Function}(HTTP.get)
 
 _normalise_space(text) = strip(replace(String(text), r"\s+" => " "))
+
+const _regex_special_characters = Set(
+    ['\\', '.', '^', '$', '*', '+', '?', '{', '}', '[', ']', '|', '(', ')'],
+)
+
+function _regex_escape(text::AbstractString)
+    output = IOBuffer()
+    for character in String(text)
+        character in _regex_special_characters && write(output, '\\')
+        write(output, character)
+    end
+    return String(take!(output))
+end
+
+function _contains_distinct_word(text::AbstractString, word::AbstractString)
+    isempty(word) && return false
+    pattern = Regex("\\b$(_regex_escape(word))\\b", "i")
+    return occursin(pattern, text)
+end
+
+const _text_break_tags = Set([
+    :br, :div, :p, :li, :tr, :td, :th, :table, :section, :article,
+    :header, :footer, :h1, :h2, :h3, :h4, :h5, :h6,
+])
+
+function _write_structured_text(io::IO, node::Gumbo.HTMLText)
+    write(io, node.text)
+end
+
+function _write_structured_text(io::IO, node::Gumbo.HTMLElement)
+    node_tag = Gumbo.tag(node)
+    node_tag in _text_break_tags && write(io, '\n')
+    for child in Gumbo.children(node)
+        _write_structured_text(io, child)
+    end
+    node_tag in _text_break_tags && write(io, '\n')
+end
+
+_write_structured_text(io::IO, node::Gumbo.HTMLNode) = nothing
+
+function _structured_text_lines(node::Gumbo.HTMLNode)
+    text = sprint(io -> _write_structured_text(io, node))
+    lines = [_normalise_space(line) for line in split(text, '\n')]
+    return filter(line -> !isempty(line), lines)
+end
 
 function _clean_lineage_label(raw_text)
     text = replace(String(raw_text), r"[†ᵀ]" => "")
@@ -76,6 +121,14 @@ function _validated_cache(raw)
             ))
             all(node -> node isa AbstractString, raw_value) || throw(ArgumentError(
                 "Invalid cache file: lineage entries must be sequences of strings.",
+            ))
+            data[key] = String.(collect(raw_value))
+        elseif startswith(key, "resolved_lineage_")
+            raw_value isa AbstractVector || throw(ArgumentError(
+                "Invalid cache file: resolved lineage entries must be sequences of strings.",
+            ))
+            all(node -> node isa AbstractString, raw_value) || throw(ArgumentError(
+                "Invalid cache file: resolved lineage entries must be sequences of strings.",
             ))
             data[key] = String.(collect(raw_value))
         else
@@ -199,16 +252,38 @@ end
 
 function _parse_lineage_html(html::AbstractString, taxon_id::AbstractString; clean::Bool=true)
     document = parsehtml(String(html))
-    links = eachmatch(Selector("a"), document.root)
+    subject_nodes = eachmatch(Selector("#ctl00_divSubject b"), document.root)
+    content_nodes = eachmatch(Selector("#divPageContent"), document.root)
     texts = String[]
 
-    for link in links
-        href = Gumbo.getattr(link, "href", "")
-        occursin("TaxonTree", href) || continue
-        occursin(r"id=[0-9]+", href) || continue
-        push!(texts, _normalise_space(nodeText(link)))
-        link_id = match(r"id=([0-9]+)", href)
-        link_id !== nothing && link_id.captures[1] == taxon_id && break
+    # Match the R/Python parser: prefer the complete hierarchy text because
+    # The Taxonomicon includes meaningful intermediate nodes that are not
+    # always hyperlinks. Stop at the page's subject taxon so descendants are
+    # never included.
+    if !isempty(subject_nodes) && !isempty(content_nodes)
+        current_name = _normalise_space(nodeText(subject_nodes[1]))
+        raw_lines = _structured_text_lines(content_nodes[1])
+
+        tree_start = findfirst(line -> startswith(line, "Natura"), raw_lines)
+        tree_start === nothing || (raw_lines = raw_lines[tree_start:end])
+
+        searchable_lines = replace.(raw_lines, r"[†ᵀ]" => "")
+        cutoff = findfirst(
+            line -> _contains_distinct_word(line, current_name),
+            searchable_lines,
+        )
+        texts = cutoff === nothing ? raw_lines : raw_lines[1:cutoff]
+    else
+        # Fallback for simplified or legacy pages without the content IDs.
+        links = eachmatch(Selector("a"), document.root)
+        for link in links
+            href = Gumbo.getattr(link, "href", "")
+            occursin("TaxonTree", href) || continue
+            occursin(r"id=[0-9]+", href) || continue
+            push!(texts, _normalise_space(nodeText(link)))
+            link_id = match(r"id=([0-9]+)", href)
+            link_id !== nothing && link_id.captures[1] == taxon_id && break
+        end
     end
 
     lineage = String[]
@@ -278,8 +353,7 @@ function get_taxonomicon_id(taxon; verbose::Bool=false)
         exact = [candidate for candidate in biological if begin
             lineage = get_lineage_by_id(candidate.id; clean=true, verbose=false)
             lineage !== nothing && any(
-                node -> lowercase(node) == lowercase(taxon_name),
-                lineage,
+                node -> _contains_distinct_word(node, taxon_name), lineage,
             )
         end]
         isempty(exact) || (biological = exact)
@@ -298,6 +372,11 @@ end
 function get_lineage(taxon; clean::Bool=true, verbose::Bool=false)
     taxon_name = String(taxon)
     is_id = occursin(r"^[0-9]+$", taxon_name)
+    resolved_key = "resolved_lineage_$(clean ? 1 : 0)_$(taxon_name)"
+    if !is_id && haskey(_taxodist_cache, resolved_key)
+        verbose && println("Using cached resolved lineage for $(taxon_name)")
+        return copy(_taxodist_cache[resolved_key])
+    end
     id = is_id ? taxon_name : get_taxonomicon_id(taxon_name; verbose=verbose)
     id === nothing && return nothing
 
@@ -319,5 +398,7 @@ function get_lineage(taxon; clean::Bool=true, verbose::Bool=false)
         lineage = lineage[1:target_index]
     end
 
-    return isempty(lineage) ? nothing : lineage
+    isempty(lineage) && return nothing
+    _taxodist_cache[resolved_key] = copy(lineage)
+    return lineage
 end
