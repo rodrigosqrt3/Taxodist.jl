@@ -3,11 +3,14 @@ module Taxodist
 using Cascadia
 using Clustering
 using DataFrames
+using Dates
 using Gumbo
 using HTTP
 using JSON3
 using LinearAlgebra
 using Plots
+
+const TAXODIST_VERSION = v"0.8.0"
 
 export clear_cache,
        save_cache,
@@ -17,6 +20,10 @@ export clear_cache,
        get_lineage_by_id,
        get_lineage,
        taxo_search,
+       TaxodistResolution,
+       taxo_resolve,
+       taxo_from_lineages,
+       summary_counts,
        taxo_distance,
        mrca,
        TaxonomicDistanceMatrix,
@@ -36,10 +43,16 @@ export clear_cache,
        plot_taxodist_cluster,
        plot_taxodist_ord,
        summary_taxodist_ord,
-       load_taxobase
+       load_taxobase,
+       TaxodistBundle,
+       taxo_bundle,
+       validate_taxodist_bundle,
+       write_taxodist_bundle,
+       read_taxodist_bundle
 
 include("fetch.jl")
 include("distance.jl")
+include("bundle.jl")
 include("utils.jl")
 include("data.jl")
 

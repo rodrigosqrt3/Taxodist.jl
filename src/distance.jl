@@ -112,11 +112,7 @@ struct TaxonomicDistanceMatrix <: AbstractMatrix{Float64}
         size(values, 1) == length(taxa) || throw(ArgumentError(
             "The number of taxon labels must match the matrix dimensions.",
         ))
-        labels = String.(taxa)
-        length(unique(labels)) == length(labels) || throw(ArgumentError(
-            "Taxon labels must be unique.",
-        ))
-        return new(Matrix{Float64}(values), labels)
+        return new(Matrix{Float64}(values), String.(taxa))
     end
 end
 
@@ -147,7 +143,10 @@ end
     distance_matrix(taxa; verbose=false, progress=true)
 
 Retrieve the requested lineages and calculate a symmetric labeled distance
-matrix. Unresolved taxa receive `NaN` in their off-diagonal comparisons.
+matrix. `taxa` may be a vector of names, a `TaxodistResolution` whose stored
+lineages are reused without retrieval, or a `TaxodistBundle` whose validated
+stored matrix is returned. Unresolved taxa receive `NaN` in their
+off-diagonal comparisons.
 """
 function distance_matrix(
     taxa::AbstractVector;
@@ -155,21 +154,25 @@ function distance_matrix(
     progress::Bool=true,
 )
     labels = String.(taxa)
-    length(unique(labels)) == length(labels) || throw(ArgumentError(
-        "Taxon names must be unique.",
-    ))
-
     n_taxa = length(labels)
-    values = fill(NaN, n_taxa, n_taxa)
-    for i in 1:n_taxa
-        values[i, i] = 0.0
-    end
-
     lineages = Vector{Union{Nothing,Vector{String}}}(undef, n_taxa)
     for (i, taxon) in pairs(labels)
         progress && verbose && println("Retrieving lineage $(i)/$(n_taxa): $(taxon)")
         lineage = get_lineage(taxon; verbose=verbose)
         lineages[i] = lineage === nothing ? nothing : String.(lineage)
+    end
+
+    return _distance_matrix_from_lineages(labels, lineages)
+end
+
+function _distance_matrix_from_lineages(labels, lineages)
+    n_taxa = length(labels)
+    length(lineages) == n_taxa || throw(ArgumentError(
+        "The number of lineages must match the number of labels.",
+    ))
+    values = fill(NaN, n_taxa, n_taxa)
+    for i in 1:n_taxa
+        values[i, i] = 0.0
     end
 
     if n_taxa >= 2
@@ -185,6 +188,23 @@ function distance_matrix(
     end
 
     return TaxonomicDistanceMatrix(values, labels)
+end
+
+function distance_matrix(
+    resolution::TaxodistResolution;
+    verbose::Bool=false,
+    progress::Bool=true,
+)
+    required = Set(RESOLUTION_COLUMNS)
+    issubset(required, Set(names(resolution.data))) || throw(ArgumentError(
+        "Invalid TaxodistResolution object.",
+    ))
+    labels = String.(resolution.input)
+    lineages = [
+        lineage === nothing ? nothing : String.(lineage)
+        for lineage in resolution.lineage
+    ]
+    return _distance_matrix_from_lineages(labels, lineages)
 end
 
 _distance_sort_key(value::Real) = isnan(value) ? Inf : Float64(value)

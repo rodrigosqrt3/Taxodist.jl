@@ -21,11 +21,13 @@ end
     @test_throws KeyError matrix["Missing", "Beta"]
     @test_throws KeyError matrix["Alpha", "Missing"]
     @test size(distance_matrix(String[]; progress=false)) == (0, 0)
-    @test_throws ArgumentError distance_matrix(["Alpha", "Alpha"]; progress=false)
+    duplicate = distance_matrix(["Alpha", "Alpha"]; progress=false)
+    @test duplicate.taxa == ["Alpha", "Alpha"]
+    @test duplicate[1, 2] == 0.0
 
     @test_throws ArgumentError TaxonomicDistanceMatrix(zeros(2, 3), ["A", "B"])
     @test_throws ArgumentError TaxonomicDistanceMatrix(zeros(2, 2), ["A"])
-    @test_throws ArgumentError TaxonomicDistanceMatrix(zeros(2, 2), ["A", "A"])
+    @test TaxonomicDistanceMatrix(zeros(2, 2), ["A", "A"]).taxa == ["A", "A"]
 
     shown = sprint(show, MIME"text/plain"(), matrix)
     @test occursin("TaxonomicDistanceMatrix", shown)
@@ -179,4 +181,187 @@ end
     zero_result = taxo_ordinate(zero_matrix; k=2)
     @test names(zero_result.points) == ["taxon"]
     @test all(isnan, zero_result.GOF)
+end
+
+function offline_resolution_080()
+    return taxo_from_lineages(
+        Dict(
+            "Alpha" => ["Biota", "Animalia", "Alpha"],
+            "Beta" => ["Biota", "Animalia", "Beta"],
+        );
+        source="Curated study",
+    )
+end
+
+@testset "Portable taxodist bundles" begin
+    resolution = offline_resolution_080()
+    bundle = taxo_bundle(resolution; progress=false)
+
+    @test bundle isa TaxodistBundle
+    @test bundle.schema_version == "1.0"
+    @test bundle.source["name"] == "Curated study"
+    @test bundle.source["url"] === nothing
+    @test bundle.software["version"] == "0.8.0"
+    @test bundle.software["language"] == "Julia"
+    @test bundle.metric["name"] == "inverse_mrca_depth"
+    @test bundle.resolution === resolution
+    @test bundle.matrix isa TaxonomicDistanceMatrix
+    @test distance_matrix(bundle) === bundle.matrix
+    @test Taxodist._analysis_matrix(bundle) === bundle.matrix
+    @test validate_taxodist_bundle(bundle) === bundle
+    @test occursin("TaxodistBundle", sprint(show, MIME"text/plain"(), bundle))
+
+    mktempdir() do directory
+        file = joinpath(directory, "bundle.json")
+        @test write_taxodist_bundle(bundle, file) == abspath(file)
+        restored = read_taxodist_bundle(file)
+        @test restored isa TaxodistBundle
+        @test restored.source["name"] == "Curated study"
+        @test restored.resolution.input == resolution.input
+        @test restored.resolution.lineage == resolution.lineage
+        @test restored.matrix.taxa == bundle.matrix.taxa
+        @test restored.matrix.values == bundle.matrix.values
+
+        compact = joinpath(directory, "compact.json")
+        write_taxodist_bundle(bundle, compact; pretty=false)
+        @test isfile(compact)
+
+        empty_file = joinpath(directory, "empty.json")
+        empty_bundle = taxo_bundle(
+            taxo_from_lineages(Dict{String,Vector{String}}());
+            progress=false,
+        )
+        write_taxodist_bundle(empty_bundle, empty_file)
+        restored_empty = read_taxodist_bundle(empty_file)
+        @test size(restored_empty.matrix) == (0, 0)
+        @test size(restored_empty.resolution.data, 1) == 0
+    end
+end
+
+@testset "Bundle missing values and portable infinities" begin
+    rows = [
+        (
+            input="Alpha",
+            resolved_name="Alpha",
+            id="1",
+            status="resolved",
+            n_candidates=1,
+            lineage_depth=2,
+            lineage=["Biota", "Alpha"],
+            candidates=Taxodist.DataFrame(id=["1"], name=["Alpha"]),
+        ),
+        (
+            input="Missing",
+            resolved_name=nothing,
+            id=nothing,
+            status="unresolved",
+            n_candidates=0,
+            lineage_depth=nothing,
+            lineage=nothing,
+            candidates=Taxodist.DataFrame(id=String[], name=String[]),
+        ),
+    ]
+    resolution = Taxodist._make_resolution(
+        rows;
+        source="The Taxonomicon",
+        source_url="http://taxonomicon.taxonomy.nl",
+    )
+    bundle = taxo_bundle(resolution; progress=false)
+    @test isnan(bundle.matrix["Alpha", "Missing"])
+
+    disconnected = taxo_bundle(taxo_from_lineages(Dict(
+        "Animal" => ["Biota", "Animal"],
+        "Mineral" => ["Natura", "Mineralia", "Mineral"],
+    )); progress=false)
+    @test isinf(disconnected.matrix["Animal", "Mineral"])
+
+    mktempdir() do directory
+        missing_file = joinpath(directory, "missing.json")
+        write_taxodist_bundle(bundle, missing_file)
+        raw_missing = Taxodist.JSON3.read(read(missing_file, String))
+        @test raw_missing.matrix.values[1][2] === nothing
+        restored_missing = read_taxodist_bundle(missing_file)
+        @test restored_missing.resolution.id[2] === nothing
+        @test restored_missing.resolution.lineage[2] === nothing
+
+        infinite_file = joinpath(directory, "infinite.json")
+        write_taxodist_bundle(disconnected, infinite_file)
+        raw_infinite = Taxodist.JSON3.read(read(infinite_file, String))
+        @test raw_infinite.matrix.values[1][2] == "Infinity"
+        @test isinf(read_taxodist_bundle(infinite_file).matrix[1, 2])
+    end
+end
+
+@testset "Bundle validation rejects inconsistent objects" begin
+    bad(change, pattern) = begin
+        bundle = taxo_bundle(offline_resolution_080(); progress=false)
+        change(bundle)
+        error = try
+            validate_taxodist_bundle(bundle)
+            nothing
+        catch caught
+            caught
+        end
+        @test error isa ArgumentError
+        error isa Exception && @test occursin(pattern, sprint(showerror, error))
+    end
+
+    @test_throws ArgumentError validate_taxodist_bundle(Dict())
+    bad(bundle -> delete!(bundle, "metric"), "required fields")
+    bad(bundle -> (bundle.schema_version = "2.0"), "Unsupported")
+    bad(bundle -> (bundle.resolution = Taxodist.DataFrame()), "wrong type")
+    bad(bundle -> (bundle.resolution.status[1] = "mystery"), "unknown")
+    bad(bundle -> (bundle.resolution.n_candidates[1] = 2), "count mismatch")
+    bad(bundle -> (bundle.resolution.id[1] = nothing), "incomplete resolved")
+    bad(bundle -> (bundle.resolution.lineage_depth[1] = 99), "depth mismatch")
+    bad(bundle -> (bundle.matrix.taxa[1] = "Wrong"), "matrix labels")
+    bad(bundle -> (bundle.matrix.values[1, 2] = 0.75), "stored distances")
+end
+
+@testset "Bundle JSON input validation and cross-language reading" begin
+    mktempdir() do directory
+        @test_throws ArgumentError read_taxodist_bundle(joinpath(directory, "missing.json"))
+
+        invalid = joinpath(directory, "invalid.json")
+        write(invalid, "not json")
+        @test_throws ArgumentError read_taxodist_bundle(invalid)
+
+        foreign = joinpath(directory, "r-bundle.json")
+        write(foreign, """
+        {
+          "format": "taxodist_bundle",
+          "schema_version": "1.0",
+          "created_at": "2026-09-23 12:00:00 UTC",
+          "source": {"name": "Curated study", "url": null, "retrieved_at": null},
+          "software": {"name": "taxodist", "version": "0.8.0", "language": "R"},
+          "metric": {
+            "name": "inverse_mrca_depth",
+            "definition": "0 for identical lineages; otherwise 1 / depth(MRCA)",
+            "root_depth": 1,
+            "common_ancestor": "continuous common lineage prefix"
+          },
+          "taxa": [{
+            "input": "Alpha",
+            "resolved_name": "Alpha",
+            "id": "custom:Alpha",
+            "status": "resolved",
+            "n_candidates": 1,
+            "lineage_depth": 2,
+            "lineage": ["Biota", "Alpha"],
+            "candidates": [{"id": "custom:Alpha", "name": "Alpha"}]
+          }],
+          "matrix": {"labels": ["Alpha"], "values": [[0]]}
+        }
+        """)
+        restored = read_taxodist_bundle(foreign)
+        @test restored.software["language"] == "R"
+        @test restored.source["url"] === nothing
+        @test restored.source["retrieved_at"] === nothing
+        @test restored.resolution.retrieved_at === nothing
+        @test restored.matrix[1, 1] == 0.0
+
+        wrong_format = joinpath(directory, "wrong.json")
+        write(wrong_format, "{\"format\":\"wrong\",\"schema_version\":\"1.0\"}")
+        @test_throws ArgumentError read_taxodist_bundle(wrong_format)
+    end
 end

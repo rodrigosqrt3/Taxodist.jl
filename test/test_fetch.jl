@@ -131,7 +131,7 @@ end
     original = Taxodist._http_get[]
     try
         function mock_ok(url, headers; kwargs...)
-            @test headers == ["User-Agent" => "taxodist Julia package/0.7.0"]
+            @test headers == ["User-Agent" => "taxodist Julia package/0.8.0"]
             @test kwargs[:status_exception] === false
             @test kwargs[:retry] === false
             @test kwargs[:request_timeout] == 30
@@ -334,4 +334,137 @@ end
     @test second == first
     @test haskey(Taxodist._taxodist_cache, "resolved_lineage_1_Alpha")
     clear_cache()
+end
+
+@testset "Auditable batch resolution" begin
+    original = Taxodist._http_get[]
+    clear_cache()
+    search_calls = Ref(0)
+    lineage_calls = Ref(0)
+    try
+        function resolution_http(url, headers; kwargs...)
+            if occursin("TaxonList", url)
+                search_calls[] += 1
+                body = if occursin("Alpha", url)
+                    """
+                    <table><tr><td>Alpha</td><td><a class="Valid" href="TaxonTree.aspx?id=1">tree</a></td></tr></table>
+                    """
+                elseif occursin("Nereis", url)
+                    """
+                    <table>
+                      <tr><td>Nereis one</td><td><a class="Valid" href="TaxonTree.aspx?id=2">tree</a></td></tr>
+                      <tr><td>Nereis two</td><td><a class="Valid" href="TaxonTree.aspx?id=3">tree</a></td></tr>
+                    </table>
+                    """
+                elseif occursin("Offline", url)
+                    return (status=503, body=UInt8[])
+                else
+                    "<html></html>"
+                end
+                return (status=200, body=Vector{UInt8}(codeunits(body)))
+            end
+
+            lineage_calls[] += 1
+            body = if occursin("id=1", url)
+                "<a href='TaxonTree.aspx?id=10'>Biota</a><a href='TaxonTree.aspx?id=1'>Alpha</a>"
+            elseif occursin("id=2", url)
+                "<a href='TaxonTree.aspx?id=10'>Biota</a><a href='TaxonTree.aspx?id=11'>Animalia</a><a href='TaxonTree.aspx?id=2'>Nereis</a>"
+            elseif occursin("id=3", url)
+                "<a href='TaxonTree.aspx?id=10'>Biota</a><a href='TaxonTree.aspx?id=11'>Animalia</a><a href='TaxonTree.aspx?id=3'>Nereis</a>"
+            elseif occursin("id=99", url)
+                "<a href='TaxonTree.aspx?id=10'>Biota</a><a href='TaxonTree.aspx?id=99'>Direct</a>"
+            else
+                "<html></html>"
+            end
+            return (status=200, body=Vector{UInt8}(codeunits(body)))
+        end
+        Taxodist._http_get[] = resolution_http
+
+        result = @test_logs (:warn, r"Ambiguous taxon names") taxo_resolve(
+            ["Alpha", "Nereis", "Missing", "Offline", "Alpha"];
+            progress=false,
+        )
+        @test result isa TaxodistResolution
+        @test result.status == [
+            "resolved", "ambiguous", "unresolved", "retrieval_error", "resolved",
+        ]
+        @test result.id == ["1", "2", nothing, nothing, "1"]
+        @test result.n_candidates == [1, 2, 0, 0, 1]
+        @test size(result.candidates[2], 1) == 2
+        @test search_calls[] == 4
+        @test lineage_calls[] == 3
+        @test result.source == "The Taxonomicon"
+        @test summary_counts(result) == (
+            resolved=2,
+            ambiguous=1,
+            unresolved=1,
+            retrieval_error=1,
+        )
+
+        first = taxo_resolve(["Nereis"]; ambiguity="first", progress=false)
+        @test first.status == ["ambiguous"]
+        @test first.id == ["2"]
+        @test_throws ArgumentError taxo_resolve(
+            ["Nereis"];
+            ambiguity="error",
+            progress=false,
+        )
+
+        direct = taxo_resolve(["99"]; progress=false)
+        failed = taxo_resolve(["404"]; progress=false)
+        @test direct.resolved_name == ["Direct"]
+        @test direct.id == ["99"]
+        @test failed.status == ["retrieval_error"]
+    finally
+        Taxodist._http_get[] = original
+        clear_cache()
+    end
+
+    @test_throws ArgumentError taxo_resolve([1, 2]; progress=false)
+    @test_throws ArgumentError taxo_resolve(["Alpha", ""]; progress=false)
+    @test_throws ArgumentError taxo_resolve(["Alpha"]; ambiguity="guess", progress=false)
+end
+
+@testset "Offline resolutions" begin
+    resolution = taxo_from_lineages(
+        Dict(
+            "Alpha" => ["Biota", "Animalia", "Alpha"],
+            "Beta" => ["Biota", "Animalia", "Beta"],
+        );
+        source="Curated study",
+    )
+    @test resolution isa TaxodistResolution
+    @test Set(resolution.id) == Set(["custom:Alpha", "custom:Beta"])
+    @test resolution.lineage_depth == [3, 3]
+    @test resolution.source == "Curated study"
+    @test resolution.source_url === nothing
+    shown = sprint(show, MIME"text/plain"(), resolution)
+    @test occursin("TaxodistResolution", shown)
+
+    matrix = distance_matrix(resolution; progress=false)
+    @test matrix["Alpha", "Beta"] == 1 / 2
+
+    named = taxo_from_lineages(
+        Dict("Alpha" => ["Root", "Alpha"], "Beta" => ["Root", "Beta"]);
+        ids=Dict("Beta" => "B", "Alpha" => "A"),
+    )
+    identifier_by_input = Dict(named.input .=> named.id)
+    @test identifier_by_input == Dict("Alpha" => "A", "Beta" => "B")
+
+    @test size(taxo_from_lineages(Dict{String,Vector{String}}()).data, 1) == 0
+    @test_throws ArgumentError taxo_from_lineages(Dict("" => ["Root"]))
+    @test_throws ArgumentError taxo_from_lineages(Dict("Alpha" => String[]))
+    @test_throws ArgumentError taxo_from_lineages(Dict("Alpha" => ["Root", ""]))
+    @test_throws ArgumentError taxo_from_lineages(
+        Dict("Alpha" => ["Root"]);
+        source="",
+    )
+    @test_throws ArgumentError taxo_from_lineages(
+        Dict("Alpha" => ["Root"]);
+        ids=String[],
+    )
+    @test_throws ArgumentError taxo_from_lineages(
+        Dict("Alpha" => ["Root"], "Beta" => ["Root"]);
+        ids=["same", "same"],
+    )
 end

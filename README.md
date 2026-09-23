@@ -1,6 +1,6 @@
 # taxodist <picture><source media="(prefers-color-scheme: dark)" srcset="images/taxodist_dark.png"><source media="(prefers-color-scheme: light)" srcset="images/taxodist_sepia.png"><img alt="taxodist logo" src="images/taxodist_sepia.png" align="right" height="200"></picture>
 
-[![version](https://juliahub.com/docs/Taxodist/version.svg)](https://juliahub.com/ui/Packages/General/Taxodist/) &nbsp; [![Julia Tests](https://github.com/rodrigosqrt3/Taxodist.jl/actions/workflows/julia.yml/badge.svg)](https://github.com/rodrigosqrt3/Taxodist.jl/actions/workflows/julia.yml) &nbsp; [![codecov](https://codecov.io/gh/rodrigosqrt3/Taxodist.jl/graph/badge.svg?token=1PWI734XC0)](https://codecov.io/gh/rodrigosqrt3/Taxodist.jl)
+[![version](https://juliahub.com/docs/Taxodist/version.svg)](https://juliahub.com/ui/Packages/General/Taxodist/) &nbsp; [![Julia Tests](https://github.com/rodrigosqrt3/taxodist-jl/actions/workflows/julia.yml/badge.svg)](https://github.com/rodrigosqrt3/taxodist-jl/actions/workflows/julia.yml) &nbsp; [![codecov](https://codecov.io/gh/rodrigosqrt3/taxodist-jl/branch/main/graph/badge.svg)](https://app.codecov.io/gh/rodrigosqrt3/taxodist-jl)
 
 **Taxonomic hierarchy distance and lineage computation for any taxon on Earth.**
 
@@ -10,7 +10,7 @@
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/rodrigosqrt3/Taxodist.jl")
+Pkg.add(url="https://github.com/rodrigosqrt3/taxodist-jl")
 ```
 
 ## Basic usage
@@ -42,6 +42,40 @@ taxo_path("Tyrannosaurus", "Velociraptor")
 # Save and restore the lineage cache across sessions
 save_cache("my_cache.json")
 load_cache("my_cache.json")
+```
+
+## Auditable and offline workflows
+
+Resolve a batch once, inspect every decision, and reuse the stored lineages
+without additional requests:
+
+```julia
+resolution = taxo_resolve(
+    ["Tyrannosaurus", "Nereis", "50841"];
+    ambiguity="warn",
+)
+
+resolution.status
+resolution.candidates
+distance_matrix(resolution)
+```
+
+Local classifications can use the same workflow completely offline:
+
+```julia
+resolution = taxo_from_lineages(Dict(
+    "Alpha" => ["Biota", "Animalia", "Alpha"],
+    "Beta" => ["Biota", "Animalia", "Beta"],
+); source="Curated study")
+```
+
+Portable bundles combine the resolution table, matrix, metric definition, and
+provenance. Their JSON schema is shared with the R and Python packages:
+
+```julia
+bundle = taxo_bundle(resolution; progress=false)
+write_taxodist_bundle(bundle, "analysis.json")
+restored = read_taxodist_bundle("analysis.json")
 ```
 
 ## The distance metric
@@ -76,5 +110,5 @@ All lineage data is sourced from **The Taxonomicon** (taxonomy.nl), based on *Sy
 
 ## Contributing
 
-Found a taxon with an incorrect lineage? Please [open an issue](https://github.com/rodrigosqrt3/Taxodist.jl/issues),
+Found a taxon with an incorrect lineage? Please [open an issue](https://github.com/rodrigosqrt3/taxodist-jl/issues),
 lineage corrections are the most valuable contribution to this package.

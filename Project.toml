@@ -1,12 +1,13 @@
 name = "Taxodist"
 uuid = "2a6cfb44-98ac-4197-aa53-d0b51c850e65"
 authors = ["Rodrigo Fonseca Villa <rodrigo03.villa@gmail.com>"]
-version = "0.7.0"
+version = "0.8.0"
 
 [deps]
 Cascadia = "54eefc05-d75b-58de-a785-1a3403f0919f"
 Clustering = "aaaa29a8-35af-508c-8bc3-b662a17a0fe5"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 Gumbo = "708ec375-b3d6-5a57-a7ce-8257bf98657a"
 HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
