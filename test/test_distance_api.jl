@@ -210,6 +210,17 @@ end
     @test Taxodist._analysis_matrix(bundle) === bundle.matrix
     @test validate_taxodist_bundle(bundle) === bundle
     @test occursin("TaxodistBundle", sprint(show, MIME"text/plain"(), bundle))
+    @test_throws ErrorException bundle.missing_property
+
+    default_source_resolution = TaxodistResolution(
+        copy(resolution.data),
+        "The Taxonomicon",
+        nothing,
+        resolution.retrieved_at,
+    )
+    default_source_bundle = taxo_bundle(default_source_resolution; progress=false)
+    @test default_source_bundle.source["url"] ==
+        "http://taxonomicon.taxonomy.nl"
 
     mktempdir() do directory
         file = joinpath(directory, "bundle.json")
@@ -274,6 +285,12 @@ end
         "Mineral" => ["Natura", "Mineralia", "Mineral"],
     )); progress=false)
     @test isinf(disconnected.matrix["Animal", "Mineral"])
+
+    negative = Taxodist._matrix_from_bundle_json(Dict(
+        "labels" => ["A", "B"],
+        "values" => [[0, "-Infinity"], ["-Infinity", 0]],
+    ))
+    @test negative["A", "B"] == -Inf
 
     mktempdir() do directory
         missing_file = joinpath(directory, "missing.json")

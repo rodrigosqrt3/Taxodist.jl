@@ -129,6 +129,7 @@ end
 
 @testset "HTTP request handling" begin
     original = Taxodist._http_get[]
+    original_parser = Taxodist._search_parser[]
     try
         function mock_ok(url, headers; kwargs...)
             @test headers == ["User-Agent" => "taxodist Julia package/0.8.0"]
@@ -149,8 +150,15 @@ end
         end
         Taxodist._http_get[] = mock_error
         @test Taxodist._request_html("http://example.test"; verbose=true) === nothing
+
+        Taxodist._http_get[] = mock_ok
+        Taxodist._search_parser[] = html -> error("parse failure")
+        details = Taxodist._taxo_search_details("Alpha"; verbose=true)
+        @test details.status == "retrieval_error"
+        @test details.results === nothing
     finally
         Taxodist._http_get[] = original
+        Taxodist._search_parser[] = original_parser
     end
 end
 
@@ -358,6 +366,10 @@ end
                     """
                 elseif occursin("Offline", url)
                     return (status=503, body=UInt8[])
+                elseif occursin("Unavailable", url)
+                    """
+                    <table><tr><td>Unavailable</td><td><a class="Valid" href="TaxonTree.aspx?id=404">tree</a></td></tr></table>
+                    """
                 else
                     "<html></html>"
                 end
@@ -412,9 +424,13 @@ end
 
         direct = taxo_resolve(["99"]; progress=false)
         failed = taxo_resolve(["404"]; progress=false)
+        unavailable = taxo_resolve(["Unavailable"]; progress=false)
         @test direct.resolved_name == ["Direct"]
         @test direct.id == ["99"]
         @test failed.status == ["retrieval_error"]
+        @test unavailable.status == ["retrieval_error"]
+        @test unavailable.n_candidates == [1]
+        @test size(unavailable.candidates[1], 1) == 1
     finally
         Taxodist._http_get[] = original
         clear_cache()
@@ -440,6 +456,7 @@ end
     @test resolution.source_url === nothing
     shown = sprint(show, MIME"text/plain"(), resolution)
     @test occursin("TaxodistResolution", shown)
+    @test_throws Exception resolution.missing_property
 
     matrix = distance_matrix(resolution; progress=false)
     @test matrix["Alpha", "Beta"] == 1 / 2

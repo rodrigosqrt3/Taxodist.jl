@@ -231,6 +231,8 @@ function _parse_search_results(html::AbstractString)
     return results
 end
 
+const _search_parser = Ref{Function}(_parse_search_results)
+
 function _taxo_search_details(taxon; verbose::Bool=false)
     verbose && println("Searching Taxonomicon for '$(taxon)'...")
     safe_taxon = HTTP.URIs.escapeuri(String(taxon))
@@ -240,7 +242,7 @@ function _taxo_search_details(taxon; verbose::Bool=false)
     html === nothing && return (status="retrieval_error", results=nothing)
 
     parsed = try
-        _parse_search_results(html)
+        _search_parser[](html)
     catch error
         verbose && println("Could not parse the Taxonomicon response: $(sprint(showerror, error))")
         return (status="retrieval_error", results=nothing)
