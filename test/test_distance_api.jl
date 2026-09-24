@@ -198,6 +198,11 @@ end
     bundle = taxo_bundle(resolution; progress=false)
 
     @test bundle isa TaxodistBundle
+    schema_version = bundle["schema_version"]
+    @test bundle[:schema_version] == schema_version
+    @test (bundle["schema_version"] = schema_version) == schema_version
+    @test (bundle[:schema_version] = schema_version) == schema_version
+    @test haskey(bundle, :schema_version)
     @test bundle.schema_version == "1.0"
     @test bundle.source["name"] == "Curated study"
     @test bundle.source["url"] === nothing

@@ -454,6 +454,10 @@ end
     @test resolution.lineage_depth == [3, 3]
     @test resolution.source == "Curated study"
     @test resolution.source_url === nothing
+    @test :status in propertynames(resolution)
+    @test size(resolution) == size(resolution.data)
+    @test length(resolution) == 2
+    @test resolution[1, :input] in ("Alpha", "Beta")
     shown = sprint(show, MIME"text/plain"(), resolution)
     @test occursin("TaxodistResolution", shown)
     @test_throws Exception resolution.missing_property
