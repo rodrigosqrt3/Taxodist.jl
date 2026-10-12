@@ -206,7 +206,7 @@ end
     @test bundle.schema_version == "1.0"
     @test bundle.source["name"] == "Curated study"
     @test bundle.source["url"] === nothing
-    @test bundle.software["version"] == "0.8.0"
+    @test bundle.software["version"] == string(Taxodist.TAXODIST_VERSION)
     @test bundle.software["language"] == "Julia"
     @test bundle.metric["name"] == "inverse_mrca_depth"
     @test bundle.resolution === resolution

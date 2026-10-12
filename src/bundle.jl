@@ -37,7 +37,7 @@ Base.keys(bundle::TaxodistBundle) = keys(bundle.data)
 Base.delete!(bundle::TaxodistBundle, key) = delete!(bundle.data, String(key))
 
 function Base.show(io::IO, ::MIME"text/plain", bundle::TaxodistBundle)
-    validate_taxodist_bundle(bundle)
+    validate_taxodist_bundle(bundle; check_distances=false)
     counts = summary_counts(bundle.resolution)
     println(io, "TaxodistBundle schema $(bundle.schema_version)")
     println(io, "created: $(bundle.created_at)")
@@ -50,22 +50,25 @@ function Base.show(io::IO, ::MIME"text/plain", bundle::TaxodistBundle)
 end
 
 """
-    taxo_bundle(taxa; ambiguity="warn", verbose=false, progress=true)
+    taxo_bundle(taxa; ambiguity="warn", verbose=false, progress=true, within=nothing)
 
 Combine an auditable resolution, its distance matrix, the shared metric
-definition, and provenance in one portable object.
+definition, and provenance in one portable object. `ambiguity`, `verbose`,
+`progress`, and `within` are passed to `taxo_resolve` for a vector of names.
 """
 function taxo_bundle(
     taxa;
     ambiguity="warn",
     verbose::Bool=false,
     progress::Bool=true,
+    within::Union{Nothing,AbstractString}=nothing,
 )
     resolution = taxa isa TaxodistResolution ? taxa : taxo_resolve(
         taxa;
         ambiguity=ambiguity,
         verbose=verbose,
         progress=progress,
+        within=within,
     )
     source_name = isempty(strip(resolution.source)) ? "The Taxonomicon" : resolution.source
     source_url = resolution.source_url
@@ -107,11 +110,15 @@ function _same_distance(left::Float64, right::Float64)
 end
 
 """
-    validate_taxodist_bundle(bundle)
+    validate_taxodist_bundle(bundle; check_distances=true)
 
 Validate all scientific and structural invariants of a `TaxodistBundle`.
+Structural checks always run. With `check_distances=true` (used when writing
+and reading bundles) every stored distance is also recomputed from the stored
+lineages; displaying a bundle or passing it to `distance_matrix` skips that
+step.
 """
-function validate_taxodist_bundle(bundle)
+function validate_taxodist_bundle(bundle; check_distances::Bool=true)
     bundle isa TaxodistBundle || throw(ArgumentError(
         "bundle must be a TaxodistBundle object.",
     ))
@@ -201,6 +208,7 @@ function validate_taxodist_bundle(bundle)
     matrix.taxa == String.(resolution.input) || throw(ArgumentError(
         "Invalid bundle: matrix labels do not match the resolution inputs.",
     ))
+    check_distances || return bundle
     expected = distance_matrix(resolution; progress=false)
     size(matrix) == size(expected) || throw(ArgumentError(
         "Invalid bundle: stored distances do not match the stored lineages.",
@@ -215,11 +223,12 @@ function validate_taxodist_bundle(bundle)
 end
 
 function distance_matrix(bundle::TaxodistBundle; kwargs...)
-    validate_taxodist_bundle(bundle)
+    validate_taxodist_bundle(bundle; check_distances=false)
     return bundle.matrix
 end
 
 _analysis_matrix(bundle::TaxodistBundle; kwargs...) = distance_matrix(bundle)
+_matrix_input(bundle::TaxodistBundle; kwargs...) = _matrix_input(bundle.resolution)
 
 function _portable_distance(value::Real)
     isnan(value) && return nothing
@@ -418,4 +427,138 @@ function read_taxodist_bundle(file::AbstractString)
         matrix=_matrix_from_bundle_json(object["matrix"]),
     )
     return validate_taxodist_bundle(bundle)
+end
+
+"""
+    TaxodistBundleComparison
+
+Result of `compare_bundles`: `taxa` (one row per input label with the kind of
+change), `distances` (pairs whose distance changed), and the creation
+timestamps `created_old` and `created_new`.
+"""
+struct TaxodistBundleComparison
+    taxa::DataFrame
+    distances::DataFrame
+    created_old::Union{Nothing,String}
+    created_new::Union{Nothing,String}
+end
+
+function Base.show(io::IO, ::MIME"text/plain", comparison::TaxodistBundleComparison)
+    changed = comparison.taxa[comparison.taxa.change .!= "unchanged", :]
+    println(io, "taxodist Bundle Comparison")
+    println(io, "* Old bundle: $(something(comparison.created_old, "unknown"))")
+    println(io, "* New bundle: $(something(comparison.created_new, "unknown"))")
+    println(io, "* Taxa compared: $(nrow(comparison.taxa)) ($(nrow(changed)) changed)")
+    println(io, "* Distances changed: $(nrow(comparison.distances))")
+    if nrow(changed) == 0
+        print(io, "No taxon changed between the two bundles.")
+    else
+        for row in eachrow(changed)
+            println(io, "> $(row.input): $(row.change)")
+        end
+    end
+end
+
+_as_bundle(bundle::TaxodistBundle, ::AbstractString) =
+    validate_taxodist_bundle(bundle; check_distances=false)
+_as_bundle(path::AbstractString, ::AbstractString) = read_taxodist_bundle(path)
+_as_bundle(::Any, name::AbstractString) = throw(ArgumentError(
+    "$(name) must be a TaxodistBundle or the path to a bundle file.",
+))
+
+"""
+    compare_bundles(old, new; tolerance=sqrt(eps(Float64)))
+
+Report how the resolution of each taxon and the pairwise distances changed
+between two bundles (or bundle JSON files), for example when an analysis is
+repeated after The Taxonomicon is updated. Each input label is classified as
+`unchanged`, `added`, `removed`, `status_changed`, `id_changed`, or
+`lineage_changed`.
+"""
+function compare_bundles(old, new; tolerance::Real=sqrt(eps(Float64)))
+    old_bundle = _as_bundle(old, "old")
+    new_bundle = _as_bundle(new, "new")
+    res_old = old_bundle.resolution.data
+    res_new = new_bundle.resolution.data
+
+    function first_positions(table)
+        positions = Dict{String,Int}()
+        for (position, label) in enumerate(table.input)
+            haskey(positions, label) || (positions[label] = position)
+        end
+        return positions
+    end
+    pos_old = first_positions(res_old)
+    pos_new = first_positions(res_new)
+    inputs = unique(vcat(String.(res_old.input), String.(res_new.input)))
+
+    pick(table, positions, label, column) =
+        haskey(positions, label) ? table[positions[label], column] : nothing
+
+    taxa = DataFrame(
+        input=String[],
+        change=String[],
+        status_old=Union{Nothing,String}[],
+        status_new=Union{Nothing,String}[],
+        id_old=Union{Nothing,String}[],
+        id_new=Union{Nothing,String}[],
+        depth_old=Union{Nothing,Int}[],
+        depth_new=Union{Nothing,Int}[],
+    )
+    for label in inputs
+        status_old = pick(res_old, pos_old, label, :status)
+        status_new = pick(res_new, pos_new, label, :status)
+        id_old = pick(res_old, pos_old, label, :id)
+        id_new = pick(res_new, pos_new, label, :id)
+        change = if !haskey(pos_old, label)
+            "added"
+        elseif !haskey(pos_new, label)
+            "removed"
+        elseif status_old != status_new
+            "status_changed"
+        elseif !isequal(id_old, id_new)
+            "id_changed"
+        elseif !isequal(
+            pick(res_old, pos_old, label, :lineage),
+            pick(res_new, pos_new, label, :lineage),
+        )
+            "lineage_changed"
+        else
+            "unchanged"
+        end
+        push!(taxa, (
+            input=label,
+            change=change,
+            status_old=status_old,
+            status_new=status_new,
+            id_old=id_old,
+            id_new=id_new,
+            depth_old=pick(res_old, pos_old, label, :lineage_depth),
+            depth_new=pick(res_new, pos_new, label, :lineage_depth),
+        ))
+    end
+
+    distances = DataFrame(
+        taxon_a=String[],
+        taxon_b=String[],
+        distance_old=Float64[],
+        distance_new=Float64[],
+    )
+    shared = [label for label in inputs if haskey(pos_old, label) && haskey(pos_new, label)]
+    for j in eachindex(shared), i in (j + 1):length(shared)
+        a, b = shared[j], shared[i]
+        value_old = old_bundle.matrix.values[pos_old[b], pos_old[a]]
+        value_new = new_bundle.matrix.values[pos_new[b], pos_new[a]]
+        same = _same_distance(value_old, value_new) ||
+            (isfinite(value_old) && isfinite(value_new) && abs(value_old - value_new) <= tolerance)
+        same || push!(distances, (
+            taxon_a=a,
+            taxon_b=b,
+            distance_old=value_old,
+            distance_new=value_new,
+        ))
+    end
+
+    created(bundle) = bundle.created_at === nothing ? nothing : String(bundle.created_at)
+    return TaxodistBundleComparison(taxa, distances, created(old_bundle), created(new_bundle))
 end

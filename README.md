@@ -40,8 +40,16 @@ filter_clade(taxa, "Dinosauria")
 taxo_path("Tyrannosaurus", "Velociraptor")
 
 # Save and restore the lineage cache across sessions
-save_cache("my_cache.json")
-load_cache("my_cache.json")
+save_cache()             # persistent per-user file; or save_cache("my_cache.json")
+load_cache()
+
+# Distances between two sets of taxa (rows × columns)
+cross_distances(["Tyrannosaurus", "Triceratops"], ["Velociraptor", "Homo"])
+
+# Classification tree whose internal nodes are named clades
+tree = taxo_tree(theropods)
+newick(tree)             # export for Phylo.jl, ape, ete3, ...
+cophenetic(tree)         # equals distance_matrix(theropods)
 ```
 
 ## Auditable and offline workflows
@@ -53,6 +61,7 @@ without additional requests:
 resolution = taxo_resolve(
     ["Tyrannosaurus", "Nereis", "50841"];
     ambiguity="warn",
+    within="Animalia",   # optional: restrict homonyms to a clade
 )
 
 resolution.status
@@ -76,6 +85,9 @@ provenance. Their JSON schema is shared with the R and Python packages:
 bundle = taxo_bundle(resolution; progress=false)
 write_taxodist_bundle(bundle, "analysis.json")
 restored = read_taxodist_bundle("analysis.json")
+
+# Months later: what changed in the source classification?
+compare_bundles("analysis.json", taxo_bundle(restored.resolution.input))
 ```
 
 ## The distance metric
@@ -99,8 +111,12 @@ The Taxonomicon provides substantially deeper lineage resolution than other prog
 ## Caching
 
 Lineages are cached in memory automatically during a session. To persist the
-cache across sessions and avoid redundant network requests, use
-`save_cache("file.json")` and `load_cache("file.json")`.
+cache across sessions and avoid redundant network requests, use `save_cache()`
+and `load_cache()`, which default to a per-user cache file
+(`TAXODIST_CACHE_DIR` overrides the directory), or pass an explicit path.
+Requests are retried automatically after transient network errors
+(`Taxodist.MAX_TRIES[]`, default 3), and `check_coverage()` reports `missing`
+when the server could not be reached.
 
 ## Data source
 

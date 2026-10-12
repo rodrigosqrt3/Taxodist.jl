@@ -153,6 +153,109 @@ function distance_matrix(
     verbose::Bool=false,
     progress::Bool=true,
 )
+    labels, lineages = _matrix_input(taxa; verbose=verbose, progress=progress)
+    return _distance_matrix_from_lineages(labels, lineages)
+end
+
+"""
+    _prefix_node_ids(lineages)
+
+Replace every lineage node by an integer identifying its complete path from
+the root. Two lineages share the node at depth `d` if and only if their
+identifiers at `d` are equal, so MRCA depths can be computed by comparing
+integers instead of strings. Returns the identifier vectors and a mask of
+missing (`nothing`) lineages, whose identifier vector is empty.
+"""
+function _prefix_node_ids(lineages)
+    codes = Dict{Tuple{Int,String},Int}()
+    ids = Vector{Vector{Int}}(undef, length(lineages))
+    missing_mask = falses(length(lineages))
+    for (index, lineage) in enumerate(lineages)
+        if lineage === nothing
+            missing_mask[index] = true
+            ids[index] = Int[]
+            continue
+        end
+        path = Vector{Int}(undef, length(lineage))
+        parent = 0
+        for (depth, node) in enumerate(lineage)
+            parent = get!(codes, (parent, String(node)), length(codes) + 1)
+            path[depth] = parent
+        end
+        ids[index] = path
+    end
+    return ids, missing_mask
+end
+
+function _prefix_distance(ids_a::Vector{Int}, ids_b::Vector{Int})
+    common = min(length(ids_a), length(ids_b))
+    depth = 0
+    @inbounds while depth < common && ids_a[depth + 1] == ids_b[depth + 1]
+        depth += 1
+    end
+    depth == 0 && return Inf
+    length(ids_a) == length(ids_b) == depth && return 0.0
+    return 1.0 / depth
+end
+
+function _distance_matrix_from_lineages(labels, lineages)
+    n_taxa = length(labels)
+    length(lineages) == n_taxa || throw(ArgumentError(
+        "The number of lineages must match the number of labels.",
+    ))
+    ids, missing_mask = _prefix_node_ids(lineages)
+    values = Matrix{Float64}(undef, n_taxa, n_taxa)
+    @inbounds for j in 1:n_taxa
+        values[j, j] = 0.0
+        for i in (j + 1):n_taxa
+            value = missing_mask[i] || missing_mask[j] ? NaN : _prefix_distance(ids[i], ids[j])
+            values[i, j] = value
+            values[j, i] = value
+        end
+    end
+
+    return TaxonomicDistanceMatrix(values, labels)
+end
+
+"""
+    TaxonomicCrossDistances(values, rows, columns)
+
+A rectangular matrix of taxonomic distances between two sets of taxa,
+returned by `cross_distances`. Supports integer indexing and label indexing
+(`matrix["Alpha", "Beta"]`) with row labels from the first set and column
+labels from the second.
+"""
+struct TaxonomicCrossDistances <: AbstractMatrix{Float64}
+    values::Matrix{Float64}
+    rows::Vector{String}
+    columns::Vector{String}
+end
+
+Base.size(matrix::TaxonomicCrossDistances) = size(matrix.values)
+Base.IndexStyle(::Type{TaxonomicCrossDistances}) = IndexCartesian()
+Base.getindex(matrix::TaxonomicCrossDistances, i::Int, j::Int) = matrix.values[i, j]
+Base.Matrix(matrix::TaxonomicCrossDistances) = copy(matrix.values)
+
+function Base.getindex(
+    matrix::TaxonomicCrossDistances,
+    row::AbstractString,
+    column::AbstractString,
+)
+    i = findfirst(==(String(row)), matrix.rows)
+    j = findfirst(==(String(column)), matrix.columns)
+    i === nothing && throw(KeyError(row))
+    j === nothing && throw(KeyError(column))
+    return matrix.values[i, j]
+end
+
+function Base.show(io::IO, ::MIME"text/plain", matrix::TaxonomicCrossDistances)
+    println(io, "$(size(matrix, 1))×$(size(matrix, 2)) TaxonomicCrossDistances")
+    println(io, "rows: ", join(matrix.rows, ", "))
+    println(io, "columns: ", join(matrix.columns, ", "))
+    show(io, MIME"text/plain"(), matrix.values)
+end
+
+function _matrix_input(taxa::AbstractVector; verbose::Bool=false, progress::Bool=true)
     labels = String.(taxa)
     n_taxa = length(labels)
     lineages = Vector{Union{Nothing,Vector{String}}}(undef, n_taxa)
@@ -161,33 +264,41 @@ function distance_matrix(
         lineage = get_lineage(taxon; verbose=verbose)
         lineages[i] = lineage === nothing ? nothing : String.(lineage)
     end
-
-    return _distance_matrix_from_lineages(labels, lineages)
+    return labels, lineages
 end
 
-function _distance_matrix_from_lineages(labels, lineages)
-    n_taxa = length(labels)
-    length(lineages) == n_taxa || throw(ArgumentError(
-        "The number of lineages must match the number of labels.",
+function _matrix_input(resolution::TaxodistResolution; kwargs...)
+    issubset(Set(RESOLUTION_COLUMNS), Set(names(resolution.data))) || throw(ArgumentError(
+        "Invalid TaxodistResolution object.",
     ))
-    values = fill(NaN, n_taxa, n_taxa)
-    for i in 1:n_taxa
-        values[i, i] = 0.0
-    end
+    labels = String.(resolution.input)
+    lineages = Union{Nothing,Vector{String}}[
+        lineage === nothing ? nothing : String.(lineage)
+        for lineage in resolution.lineage
+    ]
+    return labels, lineages
+end
 
-    if n_taxa >= 2
-        for i in 1:(n_taxa - 1), j in (i + 1):n_taxa
-            lineage_i = lineages[i]
-            lineage_j = lineages[j]
-            if lineage_i !== nothing && lineage_j !== nothing
-                value = _distance_value(lineage_i, lineage_j)
-                values[i, j] = value
-                values[j, i] = value
-            end
-        end
-    end
+"""
+    cross_distances(x, y; verbose=false, progress=true)
 
-    return TaxonomicDistanceMatrix(values, labels)
+Compute the rectangular matrix of taxonomic distances from every taxon in `x`
+to every taxon in `y` (for example, community members to reference taxa)
+without computing the full square matrix. `x` and `y` may be vectors of names,
+`TaxodistResolution`s, or `TaxodistBundle`s. Unresolved taxa receive `NaN`;
+taxa without a common ancestor receive `Inf`.
+"""
+function cross_distances(x, y; verbose::Bool=false, progress::Bool=true)
+    rows, lineages_x = _matrix_input(x; verbose=verbose, progress=progress)
+    columns, lineages_y = _matrix_input(y; verbose=verbose, progress=progress)
+    ids, missing_mask = _prefix_node_ids(vcat(lineages_x, lineages_y))
+    n_x = length(rows)
+    values = Matrix{Float64}(undef, n_x, length(columns))
+    for j in eachindex(columns), i in 1:n_x
+        values[i, j] = missing_mask[i] || missing_mask[n_x + j] ? NaN :
+            _prefix_distance(ids[i], ids[n_x + j])
+    end
+    return TaxonomicCrossDistances(values, rows, columns)
 end
 
 function distance_matrix(
@@ -195,15 +306,7 @@ function distance_matrix(
     verbose::Bool=false,
     progress::Bool=true,
 )
-    required = Set(RESOLUTION_COLUMNS)
-    issubset(required, Set(names(resolution.data))) || throw(ArgumentError(
-        "Invalid TaxodistResolution object.",
-    ))
-    labels = String.(resolution.input)
-    lineages = [
-        lineage === nothing ? nothing : String.(lineage)
-        for lineage in resolution.lineage
-    ]
+    labels, lineages = _matrix_input(resolution)
     return _distance_matrix_from_lineages(labels, lineages)
 end
 
@@ -313,13 +416,15 @@ end
     check_coverage(taxa; verbose=false)
 
 Return a table indicating whether each taxon can be resolved to a biological
-Taxonomicon entry.
+Taxonomicon entry. `covered` is `true` when found, `false` when absent, and
+`missing` when the answer is unknown because the server could not be reached.
 """
 function check_coverage(taxa::AbstractVector; verbose::Bool=false)
-    result = DataFrame(taxon=String[], covered=Bool[])
+    result = DataFrame(taxon=String[], covered=Union{Missing,Bool}[])
     for taxon in String.(taxa)
-        id = get_taxonomicon_id(taxon; verbose=verbose)
-        push!(result, (taxon=taxon, covered=id !== nothing))
+        status = _lookup_taxonomicon_id(taxon; verbose=verbose).status
+        covered = status == "found" ? true : status == "not_found" ? false : missing
+        push!(result, (taxon=taxon, covered=covered))
     end
     return result
 end
@@ -328,8 +433,8 @@ function _analysis_matrix(input; kwargs...)
     if input isa TaxonomicDistanceMatrix
         return input
     end
-    input isa AbstractVector || throw(ArgumentError(
-        "Expected a vector of taxon names or a TaxonomicDistanceMatrix.",
+    input isa Union{AbstractVector,TaxodistResolution} || throw(ArgumentError(
+        "Expected a vector of taxon names, a TaxodistResolution, or a TaxonomicDistanceMatrix.",
     ))
     return distance_matrix(input; kwargs...)
 end

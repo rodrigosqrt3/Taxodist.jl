@@ -132,7 +132,7 @@ end
     original_parser = Taxodist._search_parser[]
     try
         function mock_ok(url, headers; kwargs...)
-            @test headers == ["User-Agent" => "taxodist Julia package/0.8.0"]
+            @test headers == ["User-Agent" => "taxodist Julia package/$(Taxodist.TAXODIST_VERSION)"]
             @test kwargs[:status_exception] === false
             @test kwargs[:retry] === false
             @test kwargs[:request_timeout] == 30
@@ -285,7 +285,7 @@ end
 
     mktempdir() do directory
         file = joinpath(directory, "cache.json")
-        @test isnothing(Taxodist.save_cache(file))
+        @test Taxodist.save_cache(file) == file
         Taxodist.clear_cache()
         @test isnothing(Taxodist.load_cache(file))
         @test Taxodist._taxodist_cache["id_Carnotaurus"] == "12345"
@@ -403,7 +403,8 @@ end
         @test result.id == ["1", "2", nothing, nothing, "1"]
         @test result.n_candidates == [1, 2, 0, 0, 1]
         @test size(result.candidates[2], 1) == 2
-        @test search_calls[] == 4
+        # Alpha, Nereis, and Missing once each; the 503 for Offline is retried.
+        @test search_calls[] == 3 + Taxodist.MAX_TRIES[]
         @test lineage_calls[] == 3
         @test result.source == "The Taxonomicon"
         @test summary_counts(result) == (

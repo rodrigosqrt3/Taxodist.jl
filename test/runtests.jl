@@ -1,8 +1,13 @@
 using Test
 using Taxodist
 
+# Keep retry logic active but skip the real backoff pauses in tests.
+Taxodist._sleep[] = seconds -> nothing
+
 include("test_distance.jl")
 include("test_fetch.jl")
 include("test_distance_api.jl")
 include("test_utils.jl")
 include("test_data.jl")
+include("test_resolution.jl")
+include("test_matrix_tree.jl")

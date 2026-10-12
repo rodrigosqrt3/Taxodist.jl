@@ -10,7 +10,7 @@ using JSON3
 using LinearAlgebra
 using Plots
 
-const TAXODIST_VERSION = v"0.8.0"
+const TAXODIST_VERSION = v"0.9.0"
 
 export clear_cache,
        save_cache,
@@ -28,6 +28,12 @@ export clear_cache,
        mrca,
        TaxonomicDistanceMatrix,
        distance_matrix,
+       TaxonomicCrossDistances,
+       cross_distances,
+       TaxodistTree,
+       taxo_tree,
+       newick,
+       cophenetic,
        closest_relative,
        focal_distances,
        lineage_depth,
@@ -48,11 +54,14 @@ export clear_cache,
        taxo_bundle,
        validate_taxodist_bundle,
        write_taxodist_bundle,
-       read_taxodist_bundle
+       read_taxodist_bundle,
+       TaxodistBundleComparison,
+       compare_bundles
 
 include("fetch.jl")
 include("distance.jl")
 include("bundle.jl")
+include("tree.jl")
 include("utils.jl")
 include("data.jl")
 

@@ -20,8 +20,46 @@ const _astronomical_pattern =
 
 const _user_agent = "taxodist Julia package/$(TAXODIST_VERSION)"
 const _http_get = Ref{Function}(HTTP.get)
+const _sleep = Ref{Function}(sleep)
+
+"""
+    MAX_TRIES
+
+Number of attempts made for each request to The Taxonomicon (default 3).
+Network errors and server errors (5xx) are retried with exponential backoff;
+client errors (4xx) are not. Change it with `Taxodist.MAX_TRIES[] = 5`.
+"""
+const MAX_TRIES = Ref{Int}(3)
 
 _normalise_space(text) = strip(replace(String(text), r"\s+" => " "))
+
+"""
+    _finalize_lineage(lineage, taxon)
+
+Truncate a name-resolved lineage at the queried taxon. Genus-level and higher
+queries drop nodes containing spaces (species and bracketed rank labels);
+binomial queries keep only the queried binomial. The taxon is matched exactly
+first and case-insensitively as a fallback, and appended only when absent.
+"""
+function _finalize_lineage(lineage::AbstractVector, taxon::AbstractString)
+    folded = lowercase(taxon)
+    function target_indices(nodes)
+        exact = findall(==(taxon), nodes)
+        isempty(exact) || return exact
+        return findall(node -> lowercase(node) == folded, nodes)
+    end
+
+    if !occursin(" ", taxon)
+        nodes = String[node for node in lineage if !occursin(" ", node) && !startswith(node, "[")]
+        matches = target_indices(nodes)
+        isempty(matches) || return nodes[1:last(matches)]
+    else
+        nodes = String[node for node in lineage if !occursin(" ", node) || lowercase(node) == folded]
+        matches = target_indices(nodes)
+        isempty(matches) || return nodes[1:first(matches)]
+    end
+    return push!(nodes, String(taxon))
+end
 
 const _regex_special_characters = Set(
     ['\\', '.', '^', '$', '*', '+', '?', '{', '}', '[', ']', '|', '(', ')'],
@@ -92,12 +130,47 @@ function clear_cache()
     return nothing
 end
 
-function save_cache(file::AbstractString)
+"""
+    _default_cache_file()
+
+Location of the persistent per-user cache file. `TAXODIST_CACHE_DIR`
+overrides the directory; otherwise `%LOCALAPPDATA%\\taxodist\\Cache` on
+Windows, `~/Library/Caches/taxodist` on macOS, and `\$XDG_CACHE_HOME/taxodist`
+(default `~/.cache/taxodist`) elsewhere.
+"""
+_platform() = Sys.iswindows() ? :windows : Sys.isapple() ? :apple : :unix
+
+function _default_cache_file(platform::Symbol=_platform())
+    directory = get(ENV, "TAXODIST_CACHE_DIR", "")
+    if isempty(directory)
+        directory = if platform === :windows
+            joinpath(get(ENV, "LOCALAPPDATA", homedir()), "taxodist", "Cache")
+        elseif platform === :apple
+            joinpath(homedir(), "Library", "Caches", "taxodist")
+        else
+            xdg = get(ENV, "XDG_CACHE_HOME", "")
+            joinpath(isempty(xdg) ? joinpath(homedir(), ".cache") : xdg, "taxodist")
+        end
+    end
+    return joinpath(directory, "lineage-cache.json")
+end
+
+"""
+    save_cache(file=nothing)
+
+Write the session cache to a JSON file and return its path. Without a file,
+a persistent per-user cache file is used (see `TAXODIST_CACHE_DIR`).
+"""
+function save_cache(file::Union{Nothing,AbstractString}=nothing)
+    if file === nothing
+        file = _default_cache_file()
+        mkpath(dirname(file))
+    end
     open(file, "w") do stream
         JSON3.write(stream, _taxodist_cache)
     end
     println("Cache saved to '$(file)' ($(length(_taxodist_cache)) entries).")
-    return nothing
+    return String(file)
 end
 
 function _validated_cache(raw)
@@ -115,7 +188,7 @@ function _validated_cache(raw)
                 "Invalid cache file: taxon ID entries must be non-empty strings.",
             ))
             data[key] = value
-        elseif startswith(key, "lin_")
+        elseif startswith(key, "lin_") || startswith(key, "rawlin_")
             raw_value isa AbstractVector || throw(ArgumentError(
                 "Invalid cache file: lineage entries must be sequences of strings.",
             ))
@@ -139,7 +212,14 @@ function _validated_cache(raw)
     return data
 end
 
-function load_cache(file::AbstractString)
+"""
+    load_cache(file=nothing)
+
+Merge a cache written by `save_cache()` into the session cache after
+validating it. Without a file, the persistent per-user cache is used.
+"""
+function load_cache(file::Union{Nothing,AbstractString}=nothing)
+    file === nothing && (file = _default_cache_file())
     isfile(file) || throw(ArgumentError("Cache file not found: '$(file)'"))
     raw = JSON3.read(read(file, String))
     raw isa JSON3.Object || throw(ArgumentError(
@@ -152,10 +232,21 @@ function load_cache(file::AbstractString)
     return nothing
 end
 
+"""
+    cache_info()
+
+Print and return cache statistics: `n_lineages`, `n_ids`, `taxa` (the
+terminal node of each cached lineage, `nothing` for an empty lineage), `ids`
+(the matching Taxonomicon IDs), and `size_bytes`.
+"""
 function cache_info()
     lineage_keys = sort([key for key in keys(_taxodist_cache) if startswith(key, "lin_")])
     id_keys = sort([key for key in keys(_taxodist_cache) if startswith(key, "id_")])
-    taxa = replace.(lineage_keys, r"^lin_" => "")
+    ids = String[replace(key, r"^lin_" => "") for key in lineage_keys]
+    taxa = Union{Nothing,String}[
+        isempty(_taxodist_cache[key]) ? nothing : String(last(_taxodist_cache[key]))
+        for key in lineage_keys
+    ]
     size_bytes = Base.summarysize(_taxodist_cache)
 
     println("taxodist Cache")
@@ -167,34 +258,47 @@ function cache_info()
         println("\nNo lineages cached yet.")
     else
         println("\nCached taxa:")
-        foreach(taxon -> println("  $(taxon)"), taxa)
+        for (taxon, id) in zip(taxa, ids)
+            println("  $(something(taxon, "nothing")) (ID $(id))")
+        end
     end
 
     return (
         n_lineages=length(lineage_keys),
         n_ids=length(id_keys),
         taxa=taxa,
+        ids=ids,
         size_bytes=size_bytes,
     )
 end
 
 function _request_html(url::AbstractString; verbose::Bool=false)
-    try
-        response = _http_get[](
-            url,
-            ["User-Agent" => _user_agent];
-            status_exception=false,
-            retry=false,
-            request_timeout=30,
-        )
-        if response.status != 200
-            verbose && println("Could not reach Taxonomicon (HTTP $(response.status)).")
-            return nothing
+    tries = max(MAX_TRIES[], 1)
+    for attempt in 1:tries
+        try
+            response = _http_get[](
+                url,
+                ["User-Agent" => _user_agent];
+                status_exception=false,
+                retry=false,
+                request_timeout=30,
+            )
+            if response.status >= 500 && attempt < tries
+                _sleep[](min(2^(attempt - 1), 5))
+                continue
+            end
+            if response.status != 200
+                verbose && println("Could not reach Taxonomicon (HTTP $(response.status)).")
+                return nothing
+            end
+            return String(response.body)
+        catch error
+            if attempt == tries
+                verbose && println("Could not reach Taxonomicon: $(sprint(showerror, error))")
+                return nothing
+            end
+            _sleep[](min(2^(attempt - 1), 5))
         end
-        return String(response.body)
-    catch error
-        verbose && println("Could not reach Taxonomicon: $(sprint(showerror, error))")
-        return nothing
     end
 end
 
@@ -234,6 +338,7 @@ end
 const _search_parser = Ref{Function}(_parse_search_results)
 
 function _taxo_search_details(taxon; verbose::Bool=false)
+    taxon = _normalise_space(taxon)
     verbose && println("Searching Taxonomicon for '$(taxon)'...")
     safe_taxon = HTTP.URIs.escapeuri(String(taxon))
     url = "http://taxonomicon.taxonomy.nl/TaxonList.aspx?" *
@@ -318,12 +423,25 @@ function _parse_lineage_html(html::AbstractString, taxon_id::AbstractString; cle
     return lineage
 end
 
+"""
+    get_lineage_by_id(taxon_id; clean=true, verbose=false)
+
+Retrieve the lineage of one Taxonomicon ID (a string or integer). Cleaned and
+uncleaned lineages are cached separately (`lin_<id>` / `rawlin_<id>`), so the
+value of `clean` used in an earlier call never affects later calls.
+"""
 function get_lineage_by_id(taxon_id; clean::Bool=true, verbose::Bool=false)
-    id = strip(String(taxon_id))
+    taxon_id === nothing && return nothing
+    taxon_id isa AbstractVector && throw(ArgumentError(
+        "taxon_id must be a single ID, not a vector of $(length(taxon_id)) IDs.",
+    ))
+    id = strip(string(taxon_id))
     isempty(id) && return nothing
     occursin(r"^[0-9]+$", id) || return nothing
 
-    cache_key = "lin_$(id)"
+    clean_key = "lin_$(id)"
+    raw_key = "rawlin_$(id)"
+    cache_key = clean ? clean_key : raw_key
     if haskey(_taxodist_cache, cache_key)
         verbose && println("Using cached lineage for ID $(id)")
         return copy(_taxodist_cache[cache_key])
@@ -333,40 +451,71 @@ function get_lineage_by_id(taxon_id; clean::Bool=true, verbose::Bool=false)
     html = _request_html(url; verbose=verbose)
     html === nothing && return nothing
 
-    lineage = _parse_lineage_html(html, id; clean=clean)
-    isempty(lineage) && return nothing
-    _taxodist_cache[cache_key] = lineage
-    return copy(lineage)
+    # One request serves both variants, so cache both.
+    raw = _parse_lineage_html(html, id; clean=false)
+    isempty(raw) && return nothing
+    biota_index = findfirst(==("Biota"), raw)
+    cleaned = biota_index === nothing ? copy(raw) : raw[biota_index:end]
+    _taxodist_cache[raw_key] = raw
+    _taxodist_cache[clean_key] = cleaned
+    return copy(clean ? cleaned : raw)
 end
 
+"""
+    get_taxonomicon_id(taxon; verbose=false)
+
+Return the Taxonomicon ID of a taxon name, or `nothing` when it is absent or
+the server cannot be reached. Whitespace in the name is normalized. Only
+candidates descending from `Biota` are considered; when several remain, those
+whose lineage contains the name are preferred and a warning is emitted.
+"""
 function get_taxonomicon_id(taxon; verbose::Bool=false)
-    taxon_name = String(taxon)
+    return _lookup_taxonomicon_id(taxon; verbose=verbose).id
+end
+
+"""
+    _lookup_taxonomicon_id(taxon; verbose=false)
+
+Workhorse for `get_taxonomicon_id()`. Returns `(id, status)` where status is
+`"found"`, `"not_found"`, or `"retrieval_error"`.
+"""
+function _lookup_taxonomicon_id(taxon; verbose::Bool=false)
+    taxon_name = _normalise_space(taxon)
     cache_key = "id_$(taxon_name)"
     if haskey(_taxodist_cache, cache_key)
         verbose && println("Using cached ID for $(taxon_name)")
-        return _taxodist_cache[cache_key]
+        id = _taxodist_cache[cache_key]
+        return (id=id, status=id === nothing ? "not_found" : "found")
     end
 
-    candidates = taxo_search(taxon_name; verbose=verbose)
-    candidates === nothing && return nothing
+    search = _taxo_search_details(taxon_name; verbose=verbose)
+    if search.status == "retrieval_error"
+        @warn "Cannot reach The Taxonomicon server. The website (taxonomy.nl) appears to be offline or unreachable. Please try again later."
+        return (id=nothing, status="retrieval_error")
+    end
+    search.status == "not_found" && return (id=nothing, status="not_found")
 
     biological = NamedTuple[]
-    for candidate in eachrow(candidates)
+    lineage_failed = false
+    for candidate in eachrow(search.results)
         lineage = get_lineage_by_id(candidate.id; clean=true, verbose=false)
-        lineage === nothing && continue
+        if lineage === nothing
+            lineage_failed = true
+            continue
+        end
         "Biota" in lineage || continue
-        push!(biological, (id=String(candidate.id), name=String(candidate.name)))
+        push!(biological, (id=String(candidate.id), name=String(candidate.name), lineage=lineage))
     end
 
-    isempty(biological) && return nothing
+    if isempty(biological)
+        return (id=nothing, status=lineage_failed ? "retrieval_error" : "not_found")
+    end
 
     if length(biological) > 1
-        exact = [candidate for candidate in biological if begin
-            lineage = get_lineage_by_id(candidate.id; clean=true, verbose=false)
-            lineage !== nothing && any(
-                node -> _contains_distinct_word(node, taxon_name), lineage,
-            )
-        end]
+        exact = [
+            candidate for candidate in biological
+            if any(node -> _contains_distinct_word(node, taxon_name), candidate.lineage)
+        ]
         isempty(exact) || (biological = exact)
     end
 
@@ -377,11 +526,23 @@ function get_taxonomicon_id(taxon; verbose::Bool=false)
     final_id = biological[1].id
     _taxodist_cache[cache_key] = final_id
     verbose && println("Found $(taxon_name) with ID $(final_id)")
-    return final_id
+    return (id=final_id, status="found")
 end
 
+"""
+    get_lineage(taxon; clean=true, verbose=false)
+
+Retrieve the lineage of a single taxon name or numeric ID. Whitespace is
+normalized and the queried name is located case-insensitively when the
+lineage is truncated.
+"""
 function get_lineage(taxon; clean::Bool=true, verbose::Bool=false)
-    taxon_name = String(taxon)
+    (taxon === nothing || ismissing(taxon)) && return nothing
+    taxon isa AbstractVector && throw(ArgumentError(
+        "taxon must be a single taxon name or ID.",
+    ))
+    taxon_name = String(_normalise_space(string(taxon)))
+    isempty(taxon_name) && return nothing
     is_id = occursin(r"^[0-9]+$", taxon_name)
     resolved_key = "resolved_lineage_$(clean ? 1 : 0)_$(taxon_name)"
     if !is_id && haskey(_taxodist_cache, resolved_key)
@@ -395,21 +556,7 @@ function get_lineage(taxon; clean::Bool=true, verbose::Bool=false)
     lineage === nothing && return nothing
     is_id && return lineage
 
-    if !occursin(r"\s", taxon_name)
-        lineage = [node for node in lineage if !occursin(" ", node) && !startswith(node, "[")]
-        target_index = findlast(==(taxon_name), lineage)
-    else
-        lineage = [node for node in lineage if !occursin(" ", node) || node == taxon_name]
-        target_index = findfirst(==(taxon_name), lineage)
-    end
-
-    if target_index === nothing
-        push!(lineage, taxon_name)
-    else
-        lineage = lineage[1:target_index]
-    end
-
-    isempty(lineage) && return nothing
+    lineage = _finalize_lineage(lineage, taxon_name)
     _taxodist_cache[resolved_key] = copy(lineage)
     return lineage
 end
@@ -543,17 +690,24 @@ function _copy_resolution_row(row)
 end
 
 """
-    taxo_resolve(taxa; ambiguity="warn", verbose=false, progress=true)
+    taxo_resolve(taxa; ambiguity="warn", verbose=false, progress=true, within=nothing)
 
 Resolve names or numeric Taxonomicon IDs into an auditable batch result.
 Every input is assigned one of `resolved`, `ambiguous`, `unresolved`, or
 `retrieval_error`, while candidate tables and selected lineages are retained.
+
+Names are matched after normalizing whitespace, and the stored lineage is
+truncated at the queried taxon exactly as in `get_lineage()`, so
+`distance_matrix(taxo_resolve(x))` equals `distance_matrix(x)`. `within`
+optionally restricts candidates to those whose lineage contains a clade
+(exact, case-insensitive); names without such a candidate are `unresolved`.
 """
 function taxo_resolve(
     taxa::AbstractVector;
     ambiguity="warn",
     verbose::Bool=false,
     progress::Bool=true,
+    within::Union{Nothing,AbstractString}=nothing,
 )
     policy = lowercase(String(ambiguity))
     policy in ("warn", "first", "error") || throw(ArgumentError(
@@ -566,6 +720,23 @@ function taxo_resolve(
     all(taxon -> !isempty(strip(taxon)), labels) || throw(ArgumentError(
         "taxa cannot contain missing or empty values.",
     ))
+    within !== nothing && isempty(strip(within)) && throw(ArgumentError(
+        "within must be nothing or one non-empty clade name.",
+    ))
+    within_clade = within === nothing ? nothing : lowercase(_normalise_space(within))
+
+    function unresolved_record(taxon)
+        return (
+            input=taxon,
+            resolved_name=nothing,
+            id=nothing,
+            status="unresolved",
+            n_candidates=0,
+            lineage_depth=nothing,
+            lineage=nothing,
+            candidates=_empty_candidates(),
+        )
+    end
 
     function resolve_one(taxon::String)
         if occursin(r"^[0-9]+$", taxon)
@@ -612,16 +783,7 @@ function taxo_resolve(
 
         candidates = search.results
         if search.status == "not_found" || candidates === nothing || nrow(candidates) == 0
-            return (
-                input=taxon,
-                resolved_name=nothing,
-                id=nothing,
-                status="unresolved",
-                n_candidates=0,
-                lineage_depth=nothing,
-                lineage=nothing,
-                candidates=_empty_candidates(),
-            )
+            return unresolved_record(taxon)
         end
 
         searched_candidates = copy(candidates)
@@ -646,6 +808,13 @@ function taxo_resolve(
             )
         end
 
+        if within_clade !== nothing
+            inside = [within_clade in lowercase.(lineage) for lineage in candidate_lineages]
+            any(inside) || return unresolved_record(taxon)
+            candidates = candidates[inside, :]
+            candidate_lineages = candidate_lineages[inside]
+        end
+
         if nrow(candidates) > 1
             exact = [
                 any(node -> _contains_distinct_word(node, taxon), lineage)
@@ -657,7 +826,9 @@ function taxo_resolve(
             end
         end
 
-        selected_lineage = String.(candidate_lineages[1])
+        # Apply the same truncation as get_lineage() so that name-based and
+        # resolution-based matrices are identical.
+        selected_lineage = _finalize_lineage(String.(candidate_lineages[1]), taxon)
         candidate_count = nrow(candidates)
         return (
             input=taxon,
@@ -671,13 +842,17 @@ function taxo_resolve(
         )
     end
 
-    unique_taxa = unique(labels)
+    keys_ = String[_normalise_space(label) for label in labels]
+    unique_keys = unique(keys_)
     resolved_unique = Dict{String,Any}()
-    for (index, taxon) in pairs(unique_taxa)
-        resolved_unique[taxon] = resolve_one(taxon)
-        progress && println("Resolving taxa [$(index)/$(length(unique_taxa))]: $(taxon)")
+    for (index, key) in pairs(unique_keys)
+        resolved_unique[key] = resolve_one(key)
+        progress && println("Resolving taxa [$(index)/$(length(unique_keys))]: $(key)")
     end
-    rows = [_copy_resolution_row(resolved_unique[taxon]) for taxon in labels]
+    rows = [
+        merge(_copy_resolution_row(resolved_unique[key]), (input=label,))
+        for (label, key) in zip(labels, keys_)
+    ]
     result = _make_resolution(
         rows;
         source="The Taxonomicon",
@@ -691,7 +866,7 @@ function taxo_resolve(
             ", ",
         )
         message = "Ambiguous taxon names were resolved using the first candidate: " *
-                  details * ". Inspect taxo_search() or pass numeric IDs explicitly."
+                  details * ". Inspect taxo_search(), use `within`, or pass numeric IDs explicitly."
         policy == "error" && throw(ArgumentError(message))
         policy == "warn" && @warn message
     end

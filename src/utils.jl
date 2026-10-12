@@ -290,13 +290,23 @@ function plot_taxodist_cluster(cluster; kwargs...)
 end
 
 """
-    taxo_heatmap(taxa; display_plot=true, kwargs...)
+    taxo_heatmap(taxa; display_plot=true, verbose=false, progress=true, kwargs...)
 
 Plot a hierarchically ordered taxonomic-distance heatmap and return the
-underlying `TaxonomicDistanceMatrix`.
+underlying `TaxonomicDistanceMatrix`. `taxa` may be a vector of names, a
+`TaxodistResolution`, a `TaxodistBundle`, or a `TaxonomicDistanceMatrix`.
+`verbose` and `progress` control lineage retrieval; other keyword arguments
+are passed to `Plots.heatmap` and override the defaults (for example
+`color=:inferno` or `title="..."`).
 """
-function taxo_heatmap(taxa; display_plot::Bool=true, kwargs...)
-    matrix = _analysis_matrix(taxa; kwargs...)
+function taxo_heatmap(
+    taxa;
+    display_plot::Bool=true,
+    verbose::Bool=false,
+    progress::Bool=true,
+    kwargs...,
+)
+    matrix = _analysis_matrix(taxa; verbose=verbose, progress=progress)
     reason = _invalid_matrix_reason(matrix)
     if reason === :nan
         @warn "Distance matrix contains NaN values. Heatmap skipped."
@@ -313,15 +323,16 @@ function taxo_heatmap(taxa; display_plot::Bool=true, kwargs...)
     order = cluster.order
     labels = matrix.taxa[order]
     values = matrix.values[order, order]
-    plot = Plots.heatmap(
-        labels,
-        labels,
-        values;
-        aspect_ratio=1,
-        color=:viridis,
-        xrotation=45,
-        title="Taxonomic Distance Heatmap",
+    options = merge(
+        (
+            aspect_ratio=1,
+            color=:viridis,
+            xrotation=45,
+            title="Taxonomic Distance Heatmap",
+        ),
+        NamedTuple(kwargs),
     )
+    plot = Plots.heatmap(labels, labels, values; options...)
     display_plot && display(plot)
     return matrix
 end
