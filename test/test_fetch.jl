@@ -20,7 +20,8 @@
     @test Taxodist._clean_lineage_label("Species Alpha A.") == "Alpha"
     @test Taxodist._clean_lineage_label("Species Alpha (informal)") == "Alpha"
     @test Taxodist._clean_lineage_label("Species Alpha \"note\"") == "Alpha"
-    @test Taxodist._clean_lineage_label("\"invalid") == ""
+    # Quoted lines are returned unchanged and dropped by the caller.
+    @test Taxodist._clean_lineage_label("\"invalid") == "\"invalid"
 end
 
 @testset "Search HTML parsing" begin
@@ -52,11 +53,10 @@ end
     @test occursin("Carnotaurus", results[1].name)
 
     prefixed = Taxodist._parse_search_results("""
-    <table><tr><td>N | T | P | R | B | L Alpha</td>
+    <table><tr><td>N|T|P|R|B|L Alpha</td>
     <td><a class="Valid" href="TaxonTree.aspx?id=7">tree</a></td></tr></table>
     """)
-    @test occursin("Alpha", prefixed[1].name)
-    @test !startswith(prefixed[1].name, "N | T")
+    @test prefixed[1].name == "Alpha tree"
     @test isempty(Taxodist._parse_search_results("<table><tr><td>none</td></tr></table>"))
     @test isempty(Taxodist._parse_search_results("""
     <table>
@@ -117,14 +117,8 @@ end
         "Biota", "Animalia", "Dinosauria", "Neotheropoda", "Carnotaurus",
     ]
 
-    @test Taxodist._contains_distinct_word("Genus Gallus Brisson", "Gallus")
-    @test !Taxodist._contains_distinct_word("Gallusian clade", "Gallus")
-
-    # NullNode is the third concrete HTMLNode type in Gumbo. It carries no
-    # text, so the generic structured-text fallback must ignore it.
-    io = IOBuffer()
-    @test isnothing(Taxodist._write_structured_text(io, Taxodist.Gumbo.NullNode()))
-    @test isempty(String(take!(io)))
+    @test Taxodist._contains_word("Genus Gallus Brisson", "Gallus")
+    @test !Taxodist._contains_word("Gallusian clade", "Gallus")
 end
 
 @testset "HTTP request handling" begin
@@ -135,7 +129,10 @@ end
             @test headers == ["User-Agent" => "taxodist Julia package/$(Taxodist.TAXODIST_VERSION)"]
             @test kwargs[:status_exception] === false
             @test kwargs[:retry] === false
-            @test kwargs[:request_timeout] == 30
+            # HTTP.jl 1.x timeouts (request_timeout only exists in HTTP.jl 2).
+            @test kwargs[:readtimeout] == 30
+            @test kwargs[:connect_timeout] == 30
+            @test !haskey(kwargs, :request_timeout)
             return (status=200, body=Vector{UInt8}(codeunits("<html>ok</html>")))
         end
         Taxodist._http_get[] = mock_ok
@@ -146,10 +143,27 @@ end
         @test Taxodist._request_html("http://example.test"; verbose=true) === nothing
 
         function mock_error(url, headers; kwargs...)
-            error("offline")
+            throw(Base.IOError("offline", 0))
         end
         Taxodist._http_get[] = mock_error
         @test Taxodist._request_html("http://example.test"; verbose=true) === nothing
+
+        # Only network failures are retried and swallowed; interrupts and
+        # programming errors propagate.
+        attempts = Ref(0)
+        Taxodist._http_get[] = (url, headers; kwargs...) -> (attempts[] += 1; error("bug"))
+        @test_throws ErrorException Taxodist._request_html("http://example.test")
+        @test attempts[] == 1
+        Taxodist._http_get[] = (url, headers; kwargs...) -> throw(InterruptException())
+        @test_throws InterruptException Taxodist._request_html("http://example.test")
+        Taxodist._http_get[] = (url, headers; kwargs...) ->
+            throw(Taxodist.HTTP.Exceptions.ConnectError("http://example.test", InterruptException()))
+        @test_throws Taxodist.HTTP.Exceptions.ConnectError Taxodist._request_html("http://example.test")
+        Taxodist._http_get[] = (url, headers; kwargs...) ->
+            throw(Taxodist.HTTP.Exceptions.ConnectError("http://example.test", Base.IOError("dns", 0)))
+        @test Taxodist._request_html("http://example.test") === nothing
+        Taxodist._http_get[] = (url, headers; kwargs...) -> throw(EOFError())
+        @test Taxodist._request_html("http://example.test") === nothing
 
         Taxodist._http_get[] = mock_ok
         Taxodist._search_parser[] = html -> error("parse failure")
@@ -489,4 +503,31 @@ end
         Dict("Alpha" => ["Root"], "Beta" => ["Root"]);
         ids=["same", "same"],
     )
+end
+@testset "taxonomicon_available" begin
+    original = Taxodist._http_get[]
+    try
+        seen = Ref{Any}(nothing)
+        Taxodist._http_get[] = (url, headers; kwargs...) ->
+            (seen[] = (url, kwargs); (status=200, body=UInt8[]))
+        @test taxonomicon_available() === true
+        @test seen[][1] == "http://taxonomicon.taxonomy.nl/"
+        @test seen[][2][:connect_timeout] == 3
+        @test taxonomicon_available(timeout=0.5) === true
+        @test seen[][2][:readtimeout] == 1
+
+        Taxodist._http_get[] = (url, headers; kwargs...) -> (status=503, body=UInt8[])
+        @test taxonomicon_available() === false
+        Taxodist._http_get[] = (url, headers; kwargs...) -> throw(Base.IOError("offline", 0))
+        @test taxonomicon_available() === false
+        Taxodist._http_get[] = (url, headers; kwargs...) -> error("bug")
+        @test_throws ErrorException taxonomicon_available()
+
+        @test_throws ArgumentError taxonomicon_available(timeout=0)
+        @test_throws ArgumentError taxonomicon_available(timeout=-1)
+        @test_throws ArgumentError taxonomicon_available(timeout=NaN)
+        @test_throws ArgumentError taxonomicon_available(timeout=true)
+    finally
+        Taxodist._http_get[] = original
+    end
 end

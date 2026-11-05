@@ -117,8 +117,12 @@ end
         eig=[0.0, 0.0],
         GOF=[NaN, NaN],
     )
+    # As in R: one row per axis with eig[1:k]; NaN variance without positive
+    # eigenvalues.
     zero_summary = summary_taxodist_ord(zero_variance)
-    @test isempty(zero_summary.Axis)
+    @test zero_summary.Axis == ["PC1"]
+    @test zero_summary.Eigenvalue == [0.0]
+    @test isnan(zero_summary.Variance_Pct[1])
 end
 
 @testset "Taxonomic heatmap" begin

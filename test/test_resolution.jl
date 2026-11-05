@@ -46,8 +46,11 @@ end
     try
         page = """
         <html><body><div id="ctl00_divSubject"><b>Foo</b></div>
-        <div id="divPageContent"><div>Natura</div><div>actualia</div>
-        <div>Biota</div><div>Animalia</div><div>Foo</div></div></body></html>
+        <div id="divPageContent"><div>Natura</div>
+        <div>actualia</div>
+        <div>Biota</div>
+        <div>Animalia</div>
+        <div>Foo</div></div></body></html>
         """
         Taxodist._http_get[] = (url, headers; kwargs...) -> begin
             calls[] += 1
@@ -70,7 +73,7 @@ end
     pauses = Float64[]
     try
         Taxodist._sleep[] = seconds -> push!(pauses, seconds)
-        responses = Any[ErrorException("offline"), html_response(""; status=503), html_response("ok")]
+        responses = Any[Base.IOError("offline", 0), html_response(""; status=503), html_response("ok")]
         Taxodist._http_get[] = (url, headers; kwargs...) -> begin
             next = popfirst!(responses)
             next isa Exception && throw(next)

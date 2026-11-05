@@ -203,7 +203,7 @@ end
     @test (bundle["schema_version"] = schema_version) == schema_version
     @test (bundle[:schema_version] = schema_version) == schema_version
     @test haskey(bundle, :schema_version)
-    @test bundle.schema_version == "1.0"
+    @test bundle.schema_version == "1.1"
     @test bundle.source["name"] == "Curated study"
     @test bundle.source["url"] === nothing
     @test bundle.software["version"] == string(Taxodist.TAXODIST_VERSION)
@@ -215,7 +215,8 @@ end
     @test Taxodist._analysis_matrix(bundle) === bundle.matrix
     @test validate_taxodist_bundle(bundle) === bundle
     @test occursin("TaxodistBundle", sprint(show, MIME"text/plain"(), bundle))
-    @test_throws ErrorException bundle.missing_property
+    # Julia >= 1.12 throws FieldError; earlier versions ErrorException.
+    @test_throws (isdefined(Core, :FieldError) ? Core.FieldError : ErrorException) bundle.missing_property
 
     default_source_resolution = TaxodistResolution(
         copy(resolution.data),

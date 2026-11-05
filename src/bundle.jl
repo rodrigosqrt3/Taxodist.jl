@@ -49,12 +49,73 @@ function Base.show(io::IO, ::MIME"text/plain", bundle::TaxodistBundle)
     )
 end
 
+const _BUNDLE_SCHEMA_VERSION = "1.1"
+const _SUPPORTED_SCHEMA_VERSIONS = ("1.0", "1.1")
+
+# Portable names of the metrics, as stored in bundles.
+const _METRIC_BUNDLE_NAMES = Dict(
+    "reciprocal" => "inverse_mrca_depth",
+    "path" => "path_length",
+    "wu_palmer" => "wu_palmer",
+    "ranked" => "ranked_path_length",
+)
+
+const _METRIC_DEFINITIONS = Dict(
+    "reciprocal" => "0 for identical lineages; otherwise 1 / depth(MRCA)",
+    "path" => "0 for identical lineages; otherwise depth(A) + depth(B) - 2 depth(MRCA)",
+    "wu_palmer" => "1 - 2 depth(MRCA) / (depth(A) + depth(B))",
+    "ranked" => "Half the path length between the lineages reduced to the root, " *
+                "the nodes whose rank is one of rank_levels, and the terminal node",
+)
+
 """
-    taxo_bundle(taxa; ambiguity="warn", verbose=false, progress=true, within=nothing)
+    _metric_spec(metric, levels=_rank_levels())
+
+Portable description of a metric, as stored in bundles: `name`,
+`definition`, `root_depth`, `common_ancestor`, and, for `"ranked"`,
+`rank_levels`.
+"""
+function _metric_spec(metric::AbstractString, levels=_rank_levels())
+    spec = Dict{String,Any}(
+        "name" => _METRIC_BUNDLE_NAMES[metric],
+        "definition" => _METRIC_DEFINITIONS[metric],
+        "root_depth" => 1,
+        "common_ancestor" => "continuous common lineage prefix",
+    )
+    metric == "ranked" && (spec["rank_levels"] = collect(String, levels))
+    return spec
+end
+
+"""
+    _metric_from_spec(spec)
+
+Metric name and rank levels `(metric, levels)` of a stored metric
+description.
+"""
+function _metric_from_spec(spec)
+    name = spec isa AbstractDict ? get(spec, "name", nothing) : nothing
+    index = name isa AbstractString ?
+        findfirst(==(String(name)), _METRIC_BUNDLE_NAMES) : nothing
+    index === nothing && throw(ArgumentError("Invalid bundle: unknown distance metric."))
+    metric = String(index)
+    metric == "ranked" || return (metric=metric, levels=collect(DEFAULT_RANK_LEVELS))
+    raw_levels = get(spec, "rank_levels", nothing)
+    raw_levels isa AbstractString && (raw_levels = [raw_levels])
+    valid = raw_levels isa AbstractVector && !isempty(raw_levels) &&
+            all(level -> level isa AbstractString, raw_levels)
+    valid || throw(ArgumentError("Invalid bundle: the ranked metric requires rank_levels."))
+    return (metric=metric, levels=String[lowercase(String(level)) for level in raw_levels])
+end
+
+"""
+    taxo_bundle(taxa; ambiguity="warn", verbose=false, progress=true, within=nothing, metric="reciprocal")
 
 Combine an auditable resolution, its distance matrix, the shared metric
-definition, and provenance in one portable object. `ambiguity`, `verbose`,
-`progress`, and `within` are passed to `taxo_resolve` for a vector of names.
+definition, and provenance in one portable object (schema 1.1). `ambiguity`,
+`verbose`, `progress`, and `within` are passed to `taxo_resolve` for a vector
+of names. `metric` (see `taxo_distance`) is used for the stored matrix and
+recorded in the bundle, together with the rank levels for `"ranked"`, so
+that the matrix can be verified from the stored lineages and ranks.
 """
 function taxo_bundle(
     taxa;
@@ -62,7 +123,9 @@ function taxo_bundle(
     verbose::Bool=false,
     progress::Bool=true,
     within::Union{Nothing,AbstractString}=nothing,
+    metric="reciprocal",
 )
+    metric = _match_metric(metric)
     resolution = taxa isa TaxodistResolution ? taxa : taxo_resolve(
         taxa;
         ambiguity=ambiguity,
@@ -76,8 +139,9 @@ function taxo_bundle(
         source_url = "http://taxonomicon.taxonomy.nl"
     end
 
+    metric_spec = _metric_spec(metric)
     return TaxodistBundle(
-        schema_version="1.0",
+        schema_version=_BUNDLE_SCHEMA_VERSION,
         created_at=_utc_timestamp(),
         source=Dict{String,Any}(
             "name" => source_name,
@@ -89,14 +153,9 @@ function taxo_bundle(
             "version" => string(TAXODIST_VERSION),
             "language" => "Julia",
         ),
-        metric=Dict{String,Any}(
-            "name" => "inverse_mrca_depth",
-            "definition" => "0 for identical lineages; otherwise 1 / depth(MRCA)",
-            "root_depth" => 1,
-            "common_ancestor" => "continuous common lineage prefix",
-        ),
+        metric=metric_spec,
         resolution=resolution,
-        matrix=distance_matrix(resolution; progress=progress),
+        matrix=distance_matrix(resolution; progress=progress, metric=metric),
     )
 end
 
@@ -134,8 +193,12 @@ function validate_taxodist_bundle(bundle; check_distances::Bool=true)
     issubset(required, Set(keys(bundle))) || throw(ArgumentError(
         "Invalid TaxodistBundle: required fields are missing.",
     ))
-    bundle.schema_version == "1.0" || throw(ArgumentError(
+    bundle.schema_version in _SUPPORTED_SCHEMA_VERSIONS || throw(ArgumentError(
         "Unsupported taxodist bundle schema: $(repr(bundle.schema_version)).",
+    ))
+    metric_info = _metric_from_spec(bundle.metric)
+    bundle.schema_version == "1.0" && metric_info.metric != "reciprocal" && throw(ArgumentError(
+        "Invalid bundle: schema 1.0 supports only the reciprocal metric.",
     ))
 
     resolution = bundle.resolution
@@ -150,6 +213,7 @@ function validate_taxodist_bundle(bundle; check_distances::Bool=true)
         "Invalid bundle: unknown resolution status.",
     ))
 
+    has_ranks = "ranks" in names(resolution.data)
     for (index, row) in enumerate(eachrow(resolution.data))
         candidates = row.candidates
         lineage = row.lineage
@@ -199,6 +263,15 @@ function validate_taxodist_bundle(bundle; check_distances::Bool=true)
                 "Invalid bundle: unresolved record has candidates at row $(index).",
             ))
         end
+        # Ranks of a missing lineage are ignored (and written as null).
+        if has_ranks && lineage !== nothing
+            ranks = row.ranks
+            valid_ranks = ranks isa AbstractVector && length(ranks) == length(lineage) &&
+                all(rank -> ismissing(rank) || rank isa AbstractString, ranks)
+            valid_ranks || throw(ArgumentError(
+                "Invalid bundle: lineage ranks do not match the lineage at row $(index).",
+            ))
+        end
     end
 
     matrix = bundle.matrix
@@ -209,7 +282,9 @@ function validate_taxodist_bundle(bundle; check_distances::Bool=true)
         "Invalid bundle: matrix labels do not match the resolution inputs.",
     ))
     check_distances || return bundle
-    expected = distance_matrix(resolution; progress=false)
+    expected = _distance_matrix_impl(
+        resolution, metric_info.metric, metric_info.levels; progress=false,
+    )
     size(matrix) == size(expected) || throw(ArgumentError(
         "Invalid bundle: stored distances do not match the stored lineages.",
     ))
@@ -228,7 +303,7 @@ function distance_matrix(bundle::TaxodistBundle; kwargs...)
 end
 
 _analysis_matrix(bundle::TaxodistBundle; kwargs...) = distance_matrix(bundle)
-_matrix_input(bundle::TaxodistBundle; kwargs...) = _matrix_input(bundle.resolution)
+_matrix_input(bundle::TaxodistBundle; kwargs...) = _matrix_input(bundle.resolution; kwargs...)
 
 function _portable_distance(value::Real)
     isnan(value) && return nothing
@@ -238,12 +313,13 @@ end
 
 function _resolution_records(resolution::TaxodistResolution)
     records = Dict{String,Any}[]
+    has_ranks = "ranks" in names(resolution.data)
     for row in eachrow(resolution.data)
         candidates = [
             Dict{String,Any}("id" => String(candidate.id), "name" => String(candidate.name))
             for candidate in eachrow(row.candidates)
         ]
-        push!(records, Dict{String,Any}(
+        record = Dict{String,Any}(
             "input" => String(row.input),
             "resolved_name" => _missing_value(row.resolved_name) ? nothing : String(row.resolved_name),
             "id" => _missing_value(row.id) ? nothing : String(row.id),
@@ -252,7 +328,15 @@ function _resolution_records(resolution::TaxodistResolution)
             "lineage_depth" => _missing_value(row.lineage_depth) ? nothing : Int(row.lineage_depth),
             "lineage" => row.lineage === nothing ? nothing : String.(row.lineage),
             "candidates" => candidates,
-        ))
+        )
+        if has_ranks
+            # Missing ranks are written as JSON null; so are the ranks of a
+            # missing lineage.
+            ranks = row.lineage === nothing ? nothing : row.ranks
+            record["lineage_ranks"] = ranks === nothing ? nothing :
+                Any[ismissing(rank) ? nothing : String(rank) for rank in ranks]
+        end
+        push!(records, record)
     end
     return records
 end
@@ -261,7 +345,8 @@ end
     write_taxodist_bundle(bundle, file; pretty=true)
 
 Write a validated bundle using the shared language-independent JSON schema
-version 1.0. Returns the absolute output path.
+(version 1.1 for bundles created by `taxo_bundle`). Missing ranks are written
+as `null` in `lineage_ranks`. Returns the absolute output path.
 """
 function write_taxodist_bundle(
     bundle::TaxodistBundle,
@@ -328,7 +413,7 @@ function _matrix_from_bundle_json(matrix_data)
                 Inf
             elseif value == "-Infinity"
                 -Inf
-            elseif value isa Real
+            elseif value isa Real && !(value isa Bool)
                 Float64(value)
             else
                 throw(ArgumentError("Invalid bundle JSON: invalid matrix value."))
@@ -347,8 +432,24 @@ function _matrix_from_bundle_json(matrix_data)
     return TaxonomicDistanceMatrix(values, labels)
 end
 
+"""
+    _bundle_integer(value, field)
+
+Convert a JSON number that must hold an integer, rejecting booleans and
+non-integral values with an `ArgumentError`.
+"""
+function _bundle_integer(value, field::AbstractString)
+    value isa Real && !(value isa Bool) && isfinite(value) && isinteger(value) ||
+        throw(ArgumentError("Invalid bundle JSON: $(field) must be an integer."))
+    return Int(value)
+end
+
 function _resolution_from_bundle_json(records, source)
+    records isa AbstractVector || throw(ArgumentError(
+        "Invalid bundle JSON: taxa must be an array.",
+    ))
     rows = NamedTuple[]
+    with_ranks = any(record -> haskey(_bundle_dict(record), "lineage_ranks"), records)
     for raw_record in records
         record = _bundle_dict(raw_record)
         _required_bundle_keys(
@@ -356,6 +457,9 @@ function _resolution_from_bundle_json(records, source)
             RESOLUTION_COLUMNS,
             "taxon",
         )
+        record["candidates"] isa AbstractVector || throw(ArgumentError(
+            "Invalid bundle JSON: candidates must be an array.",
+        ))
         candidate_table = _empty_candidates()
         for raw_candidate in record["candidates"]
             candidate = _bundle_dict(raw_candidate)
@@ -366,19 +470,33 @@ function _resolution_from_bundle_json(records, source)
             ))
         end
         lineage = record["lineage"] === nothing ? nothing : String.(collect(record["lineage"]))
+        raw_ranks = get(record, "lineage_ranks", nothing)
+        ranks = if raw_ranks === nothing
+            nothing
+        else
+            raw_ranks isa AbstractVector && all(
+                rank -> rank === nothing || rank isa AbstractString, raw_ranks,
+            ) || throw(ArgumentError(
+                "Invalid bundle JSON: lineage_ranks must be an array of strings or nulls.",
+            ))
+            _rank_vector(raw_ranks)
+        end
         push!(rows, (
             input=String(record["input"]),
             resolved_name=record["resolved_name"] === nothing ? nothing : String(record["resolved_name"]),
             id=record["id"] === nothing ? nothing : String(record["id"]),
             status=String(record["status"]),
-            n_candidates=Int(record["n_candidates"]),
-            lineage_depth=record["lineage_depth"] === nothing ? nothing : Int(record["lineage_depth"]),
+            n_candidates=_bundle_integer(record["n_candidates"], "n_candidates"),
+            lineage_depth=record["lineage_depth"] === nothing ? nothing :
+                _bundle_integer(record["lineage_depth"], "lineage_depth"),
             lineage=lineage,
             candidates=candidate_table,
+            ranks=ranks,
         ))
     end
     return _make_resolution(
         rows;
+        with_ranks=with_ranks,
         source=String(source["name"]),
         source_url=source["url"] === nothing ? nothing : String(source["url"]),
         retrieved_at=source["retrieved_at"] === nothing ? nothing : String(source["retrieved_at"]),
@@ -405,7 +523,8 @@ function read_taxodist_bundle(file::AbstractString)
         "Invalid bundle JSON: unrecognized format.",
     ))
     schema_version = get(object, "schema_version", nothing)
-    schema_version == "1.0" || throw(ArgumentError(
+    schema_version isa AbstractString && schema_version in _SUPPORTED_SCHEMA_VERSIONS ||
+        throw(ArgumentError(
         "Unsupported taxodist bundle schema: $(repr(schema_version)).",
     ))
     _required_bundle_keys(
@@ -417,14 +536,26 @@ function read_taxodist_bundle(file::AbstractString)
     source = _bundle_dict(object["source"])
     _required_bundle_keys(source, ["name", "url", "retrieved_at"], "source")
     resolution = _resolution_from_bundle_json(object["taxa"], source)
+    metric = object["metric"] isa AbstractDict ? _bundle_dict(object["metric"]) : object["metric"]
+    matrix = _matrix_from_bundle_json(object["matrix"])
+    # The matrix records the stored metric (when it is a known one).
+    metric_info = try
+        _metric_from_spec(metric)
+    catch error
+        error isa ArgumentError || rethrow()
+        nothing
+    end
+    if metric_info !== nothing
+        matrix = TaxonomicDistanceMatrix(matrix.values, matrix.taxa; metric=metric_info.metric)
+    end
     bundle = TaxodistBundle(
         schema_version=String(schema_version),
         created_at=object["created_at"] === nothing ? nothing : String(object["created_at"]),
         source=source,
         software=_bundle_dict(object["software"]),
-        metric=_bundle_dict(object["metric"]),
+        metric=metric,
         resolution=resolution,
-        matrix=_matrix_from_bundle_json(object["matrix"]),
+        matrix=matrix,
     )
     return validate_taxodist_bundle(bundle)
 end

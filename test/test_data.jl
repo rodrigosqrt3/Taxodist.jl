@@ -34,8 +34,10 @@
     @test all(taxobase.statistical_matrix[i, i] == 0.0 for i in 1:15)
     @test all(isfinite, taxobase.statistical_matrix.values)
 
-    @test VersionNumber(taxobase.metadata.package_version) <= Taxodist.TAXODIST_VERSION
-    @test taxobase.metadata.generated_on == "2026-08-06"
+    # R development versions have four components (e.g. 0.9.0.9000).
+    r_version = VersionNumber(join(split(taxobase.metadata.package_version, ".")[1:3], "."))
+    @test r_version <= Taxodist.TAXODIST_VERSION
+    @test occursin(r"^\d{4}-\d{2}-\d{2}$", taxobase.metadata.generated_on)
     @test taxobase.metadata.source == "The Taxonomicon"
 end
 

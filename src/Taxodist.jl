@@ -8,9 +8,11 @@ using Gumbo
 using HTTP
 using JSON3
 using LinearAlgebra
-using Plots
+using Random
+using Random: AbstractRNG, randperm
+using Statistics: mean, quantile
 
-const TAXODIST_VERSION = v"0.9.0"
+const TAXODIST_VERSION = pkgversion(@__MODULE__)
 
 export clear_cache,
        save_cache,
@@ -19,10 +21,12 @@ export clear_cache,
        get_taxonomicon_id,
        get_lineage_by_id,
        get_lineage,
+       lineage_ranks,
        taxo_search,
        TaxodistResolution,
        taxo_resolve,
        taxo_from_lineages,
+       taxonomicon_available,
        summary_counts,
        taxo_distance,
        mrca,
@@ -56,10 +60,13 @@ export clear_cache,
        write_taxodist_bundle,
        read_taxodist_bundle,
        TaxodistBundleComparison,
-       compare_bundles
+       compare_bundles,
+       taxo_distinctness,
+       taxo_distinctness_test
 
 include("fetch.jl")
 include("distance.jl")
+include("distinctness.jl")
 include("bundle.jl")
 include("tree.jl")
 include("utils.jl")

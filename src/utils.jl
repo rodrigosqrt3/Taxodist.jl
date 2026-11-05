@@ -16,8 +16,8 @@ function compare_lineages(taxon_a, taxon_b; verbose::Bool=false)
     result = _compute_distance(
         lineage_a,
         lineage_b;
-        taxon_a=String(taxon_a),
-        taxon_b=String(taxon_b),
+        taxon_a=_taxon_label(taxon_a),
+        taxon_b=_taxon_label(taxon_b),
     )
     mrca_depth = result.mrca_depth
 
@@ -67,8 +67,8 @@ function shared_clades(taxon_a, taxon_b; verbose::Bool=false)
     result = _compute_distance(
         lineage_a,
         lineage_b;
-        taxon_a=String(taxon_a),
-        taxon_b=String(taxon_b),
+        taxon_a=_taxon_label(taxon_a),
+        taxon_b=_taxon_label(taxon_b),
     )
     result.mrca_depth == 0 && return String[]
     return String.(lineage_a[1:result.mrca_depth])
@@ -102,9 +102,9 @@ function filter_clade(
     verbose::Bool=false,
 )
     kept = String[]
-    for taxon in String.(taxa)
+    for taxon in taxa
         membership = is_member(taxon, clade; verbose=verbose)
-        membership === true && push!(kept, taxon)
+        membership === true && push!(kept, _taxon_label(taxon))
     end
     return kept
 end
@@ -117,10 +117,10 @@ to taxon B. The result contains `taxon_a`, `taxon_b`, and a `data` DataFrame
 with columns `node`, `depth`, and `direction`.
 """
 function taxo_path(taxon_a, taxon_b; verbose::Bool=false)
-    name_a = String(taxon_a)
-    name_b = String(taxon_b)
-    lineage_a = get_lineage(name_a; verbose=verbose)
-    lineage_b = get_lineage(name_b; verbose=verbose)
+    name_a = _taxon_label(taxon_a)
+    name_b = _taxon_label(taxon_b)
+    lineage_a = get_lineage(taxon_a; verbose=verbose)
+    lineage_b = get_lineage(taxon_b; verbose=verbose)
 
     if lineage_a === nothing
         @warn "Could not retrieve lineage for $(name_a)"
@@ -192,17 +192,35 @@ function summary_taxodist_ord(ordination)
         Cumulative_Pct=Float64[],
     )
 
-    positive_eigenvalues = ordination.eig[ordination.eig .> 0]
-    total = sum(positive_eigenvalues)
-    retained = positive_eigenvalues[1:min(n_axes, length(positive_eigenvalues))]
-    variance = total > 0 ? 100 .* retained ./ total : fill(NaN, length(retained))
+    # As in R: the first k eigenvalues, with the variance explained relative
+    # to the sum of the positive eigenvalues (NaN beyond the positive ones).
+    eigenvalues = Float64.(ordination.eig)
+    positive_eigenvalues = eigenvalues[eigenvalues .> 0]
+    total = sum(positive_eigenvalues; init=0.0)
+    variance = 100 .* positive_eigenvalues ./ total
+    cumulative = cumsum(variance)
+    pick(values, axis) = axis <= length(values) ? values[axis] : NaN
 
     return DataFrame(
-        Axis=["PC$(axis)" for axis in eachindex(retained)],
-        Eigenvalue=retained,
-        Variance_Pct=variance,
-        Cumulative_Pct=cumsum(variance),
+        Axis=["PC$(axis)" for axis in 1:n_axes],
+        Eigenvalue=[pick(eigenvalues, axis) for axis in 1:n_axes],
+        Variance_Pct=[pick(variance, axis) for axis in 1:n_axes],
+        Cumulative_Pct=[pick(cumulative, axis) for axis in 1:n_axes],
     )
+end
+
+"""
+    _plots()
+
+Return the Plots.jl module once it has been loaded (`using Plots`), which
+activates the plotting extension of Taxodist.
+"""
+function _plots()
+    extension = Base.get_extension(@__MODULE__, :TaxodistPlotsExt)
+    extension === nothing && error(
+        "Plotting requires Plots.jl. Run `using Plots` (after installing it) and try again.",
+    )
+    return extension.Plots
 end
 
 """
@@ -223,7 +241,7 @@ function plot_taxodist_ord(ordination; kwargs...)
         "Taxonomic Ordination (PCoA)  (GOF = $(round(goodness; digits=3)))" :
         "Taxonomic Ordination (PCoA)"
 
-    plot = Plots.scatter(
+    plot = _plots().scatter(
         x,
         y;
         series_annotations=points.taxon,
@@ -276,7 +294,7 @@ function plot_taxodist_cluster(cluster; kwargs...)
     cluster.hclust === nothing && return nothing
     xs, ys = _dendrogram_coordinates(cluster.hclust)
     labels = cluster.dist.taxa[cluster.hclust.order]
-    return Plots.plot(
+    return _plots().plot(
         xs,
         ys;
         label=false,
@@ -290,12 +308,13 @@ function plot_taxodist_cluster(cluster; kwargs...)
 end
 
 """
-    taxo_heatmap(taxa; display_plot=true, verbose=false, progress=true, kwargs...)
+    taxo_heatmap(taxa; display_plot=true, verbose=false, progress=true, metric="reciprocal", kwargs...)
 
 Plot a hierarchically ordered taxonomic-distance heatmap and return the
 underlying `TaxonomicDistanceMatrix`. `taxa` may be a vector of names, a
 `TaxodistResolution`, a `TaxodistBundle`, or a `TaxonomicDistanceMatrix`.
-`verbose` and `progress` control lineage retrieval; other keyword arguments
+`verbose`, `progress`, and `metric` (see `taxo_distance`) are passed to
+`distance_matrix` when `taxa` is not already a matrix; other keyword arguments
 are passed to `Plots.heatmap` and override the defaults (for example
 `color=:inferno` or `title="..."`).
 """
@@ -304,9 +323,10 @@ function taxo_heatmap(
     display_plot::Bool=true,
     verbose::Bool=false,
     progress::Bool=true,
+    metric="reciprocal",
     kwargs...,
 )
-    matrix = _analysis_matrix(taxa; verbose=verbose, progress=progress)
+    matrix = _analysis_matrix(taxa; verbose=verbose, progress=progress, metric=metric)
     reason = _invalid_matrix_reason(matrix)
     if reason === :nan
         @warn "Distance matrix contains NaN values. Heatmap skipped."
@@ -332,7 +352,7 @@ function taxo_heatmap(
         ),
         NamedTuple(kwargs),
     )
-    plot = Plots.heatmap(labels, labels, values; options...)
+    plot = _plots().heatmap(labels, labels, values; options...)
     display_plot && display(plot)
     return matrix
 end

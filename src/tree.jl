@@ -91,9 +91,10 @@ function cophenetic(tree::TaxodistTree)
         return path
     end
     paths = [ancestors(tip) for tip in 1:tips]
+    ancestor_sets = [Set(path) for path in paths]
     values = zeros(tips, tips)
     for i in 1:tips, j in (i + 1):tips
-        seen = Set(paths[i])
+        seen = ancestor_sets[i]
         common = first(node for node in paths[j] if node in seen)
         values[i, j] = values[j, i] = depth[i] + depth[j] - 2 * depth[common]
     end
