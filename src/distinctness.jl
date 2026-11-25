@@ -23,8 +23,9 @@ in `comm`. When it is `nothing`, distances are computed with
 metric gives the step weights of Clarke and Warwick (1 for congeneric taxa,
 2 for confamilial, ...); any metric can be used.
 
-Returns a named tuple `(metric, data)`: `metric` is the metric recorded in
-`d` (`nothing` when unknown) and `data` a `DataFrame` with one row per sample
+Returns a `TaxodistDistinctness` with fields `metric` and `data`: `metric` is
+the metric recorded in `d` (`nothing` when unknown) and `data` a `DataFrame`
+with one row per sample
 and columns `sample`, `S` (number of taxa present), `Delta`, `Delta_star`,
 `Delta_plus`, `Lambda_plus`, and `SDelta_plus` (S Δ+). The indices are `NaN`
 for samples with fewer than two taxa, or when a distance between present
@@ -75,7 +76,33 @@ function taxo_distinctness(
     for (row, name) in enumerate(sample_names)
         push!(data, merge((sample=name,), _distinctness_indices(abundances[row, :], full)))
     end
-    return (metric=d.metric, data=data)
+    return TaxodistDistinctness(d.metric, data)
+end
+
+"""
+    TaxodistDistinctness
+
+Result of `taxo_distinctness`, with fields `metric` (the metric recorded in
+the distance matrix, `nothing` when unknown) and `data` (a `DataFrame` with
+one row per sample). Like the named tuple returned by earlier versions, it
+can be destructured: `metric, data = taxo_distinctness(...)`.
+"""
+struct TaxodistDistinctness
+    metric::Union{Nothing,String}
+    data::DataFrame
+end
+
+Base.iterate(result::TaxodistDistinctness, state::Int=1) =
+    state > 2 ? nothing : (getfield(result, state), state + 1)
+# Named-tuple style access, kept for compatibility with earlier versions.
+Base.keys(::TaxodistDistinctness) = (:metric, :data)
+Base.getindex(result::TaxodistDistinctness, key::Symbol) = getproperty(result, key)
+Base.getindex(result::TaxodistDistinctness, index::Int) = getfield(result, index)
+
+function Base.show(io::IO, ::MIME"text/plain", result::TaxodistDistinctness)
+    println(io, "Taxonomic distinctness")
+    result.metric === nothing || println(io, "Metric: ", result.metric)
+    show(io, MIME"text/plain"(), result.data; summary=false, eltypes=false, show_row_number=false)
 end
 
 """

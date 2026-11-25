@@ -35,7 +35,118 @@ end
     ids, missing_mask = Taxodist._prefix_node_ids([["Biota"], nothing])
     @test missing_mask == [false, true]
     @test isempty(ids[2])
-    @test Taxodist._prefix_distance(Int[], Int[]) == Inf
+    @test Taxodist._metric_value(0, 0, 0, :reciprocal) == Inf
+end
+
+# Brute-force MRCA depths and distances, as in R's tests of .mrca_index().
+function brute_distance(a, b, metric)
+    (a === nothing || b === nothing) && return NaN
+    return Taxodist._compute_distance(a, b; metric=metric).distance
+end
+
+@testset "Sorted-prefix MRCA index agrees with pairwise comparison" begin
+    state = Ref(UInt64(20261124))
+    next_int(k) = (state[] = state[] * 6364136223846793005 + 1442695040888963407;
+                   Int((state[] >> 33) % k) + 1)
+    random_lineage() = ["n$(d)_$(next_int(2) - 1)" for d in 1:next_int(12)]
+    lineages = Union{Nothing,Vector{String}}[random_lineage() for _ in 1:40]
+    append!(lineages, Union{Nothing,Vector{String}}[
+        nothing,                                  # unresolved taxon
+        String[],                                 # empty lineage
+        ["n1_0", "n2_0"],                         # ancestor of others
+        ["n1_0", "n2_0"],                         # duplicate
+        ["Other", "root"],                        # disconnected hierarchy
+        ["n1_0", "n2_0", "n3_1", "n4_0", "n5_1"],
+    ])
+    n = length(lineages)
+    labels = ["t$(i)" for i in 1:n]
+    for metric in ("reciprocal", "path", "wu_palmer")
+        fast = Taxodist._distance_matrix_from_lineages(labels, lineages; metric=metric)
+        for j in 1:n, i in 1:n
+            expected = i == j ? 0.0 : brute_distance(lineages[i], lineages[j], metric)
+            @test isequal(fast[i, j], expected)
+        end
+    end
+
+    ids, _ = Taxodist._prefix_node_ids(lineages)
+    index = Taxodist._mrca_index(ids)
+    for j in (1, 20, n - 1, n)
+        expected = [
+            l === nothing || lineages[j] === nothing ? 0 :
+            Taxodist._common_prefix_depth(l, lineages[j]) for l in lineages
+        ]
+        @test Taxodist._mrca_depths_from(index, j) == expected
+    end
+
+    # The ranked metric goes through the same index on reduced lineages.
+    ranked = Dict(
+        "a" => ["Biota", "Animalia", "Felidae", "A"],
+        "b" => ["Biota", "Animalia", "Canidae", "B"],
+        "c" => ["Biota", "Plantae", "C"],
+    )
+    rank_vectors = Dict(
+        "a" => [missing, "Kingdom", "Family", "Species"],
+        "b" => [missing, "Kingdom", "Family", "Species"],
+        "c" => [missing, "Kingdom", "Species"],
+    )
+    resolution = taxo_from_lineages(ranked; ranks=rank_vectors)
+    matrix = distance_matrix(resolution; progress=false, metric="ranked")
+    for x in matrix.taxa, y in matrix.taxa
+        expected = Taxodist._compute_distance(
+            (nodes=ranked[x], ranks=rank_vectors[x]),
+            (nodes=ranked[y], ranks=rank_vectors[y]); metric="ranked",
+        ).distance
+        @test matrix[x, y] == expected
+    end
+end
+
+@testset "cross_distances uses the same index as distance_matrix" begin
+    state = Ref(UInt64(7))
+    next_int(k) = (state[] = state[] * 6364136223846793005 + 1442695040888963407;
+                   Int((state[] >> 33) % k) + 1)
+    lineages = [
+        "t$(i)" => ["c$(d)$(next_int(2) - 1)" for d in 1:(next_int(7) + 1)]
+        for i in 1:25
+    ]
+    x = taxo_from_lineages(lineages[1:10])
+    y = taxo_from_lineages(lineages[11:25])
+    for metric in ("reciprocal", "path", "wu_palmer")
+        full = distance_matrix(taxo_from_lineages(lineages); progress=false, metric=metric)
+        cross = cross_distances(x, y; progress=false, metric=metric)
+        @test isequal(cross.values, full.values[1:10, 11:25])
+    end
+
+    # Unresolved taxa on either side give NaN; empty lineages behave as in
+    # distance_matrix.
+    with_missing = Union{Nothing,Vector{String}}[["a", "b"], nothing, String[]]
+    labels = ["p", "q", "r"]
+    ids, missing_mask = Taxodist._prefix_node_ids(with_missing)
+    @test missing_mask == [false, true, false]
+    square = Taxodist._distance_matrix_from_lineages(labels, with_missing; metric="wu_palmer")
+    @test isnan(square[1, 2]) && isnan(square[2, 3])
+    @test square[1, 3] == 1.0 && square[3, 1] == 1.0   # no shared root
+    @test square[3, 3] == 0.0
+    # Two empty lineages: 1 - 0/0, as in R.
+    @test isnan(Taxodist._distance_matrix_from_lineages(
+        ["e1", "e2"], [String[], String[]]; metric="wu_palmer",
+    )[1, 2])
+    cross = cross_distances(
+        taxo_from_lineages(["a" => ["r", "a"]]), [missing, "  "];
+        progress=false,
+    )
+    @test all(isnan, cross.values)
+    @test all(isnan, cross_distances([missing], taxo_from_lineages(["a" => ["r", "a"]]);
+                                     progress=false).values)
+end
+
+@testset "MRCA index handles degenerate inputs" begin
+    empty_index = Taxodist._mrca_index(Vector{Int}[])
+    @test isempty(empty_index.order) && isempty(empty_index.adj)
+    single = Taxodist._mrca_index(first(Taxodist._prefix_node_ids([["a", "b"]])))
+    @test Taxodist._mrca_depths_from(single, 1) == [2]
+    flat = Taxodist._mrca_index(first(Taxodist._prefix_node_ids([String[], String[]])))
+    @test Taxodist._mrca_depths_from(flat, 1) == [0, 0]
+    @test size(Taxodist._distance_matrix_from_lineages(String[], Vector{String}[])) == (0, 0)
 end
 
 @testset "Cross distances" begin
@@ -199,6 +310,39 @@ end
 
     disconnected = Dict("A" => ["Root A", "A"], "B" => ["Root B", "B"])
     @test nrow(compare_bundles(make_bundle(disconnected), make_bundle(disconnected)).distances) == 0
+
+    # Metrics of the two bundles.
+    @test same.metric_old == "reciprocal" && same.metric_new == "reciprocal"
+    @test !same.metric_changed
+    @test !occursin("different", sprint(show, MIME"text/plain"(), same))
+    resolution = taxo_from_lineages(lineages)
+    reciprocal = taxo_bundle(resolution; progress=false)
+    path = taxo_bundle(resolution; progress=false, metric="path")
+    across = compare_bundles(reciprocal, path)
+    @test across.metric_old == "reciprocal"
+    @test across.metric_new == "path"
+    @test across.metric_changed
+    shown = sprint(show, MIME"text/plain"(), across)
+    @test occursin("! The bundles use different metrics: \"reciprocal\" and \"path\".", shown)
+    @test occursin("No taxon changed", shown)
+    @test occursin("Distances changed: 1", shown)
+
+    ranks = Dict("Alpha" => [missing, "Phylum", "Genus"], "Beta" => [missing, "Phylum", "Genus"])
+    ranked_resolution = taxo_from_lineages(lineages; ranks=ranks)
+    ranked_default = taxo_bundle(ranked_resolution; progress=false, metric="ranked")
+    levels = copy(Taxodist.RANK_LEVELS[])
+    ranked_other = try
+        Taxodist.RANK_LEVELS[] = ["phylum", "genus"]
+        taxo_bundle(ranked_resolution; progress=false, metric="ranked")
+    finally
+        Taxodist.RANK_LEVELS[] = levels
+    end
+    levels_changed = compare_bundles(ranked_default, ranked_other)
+    @test levels_changed.metric_old == levels_changed.metric_new == "ranked"
+    @test levels_changed.metric_changed
+    @test occursin("! The bundles use different rank levels for the \"ranked\" metric.",
+                   sprint(show, MIME"text/plain"(), levels_changed))
+    @test !compare_bundles(ranked_default, ranked_default).metric_changed
 
     # Using a bundle skips recomputation; writing still checks distances.
     tampered = make_bundle(Dict("Alpha" => ["Biota", "Alpha"], "Beta" => ["Biota", "Beta"]))

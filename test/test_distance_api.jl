@@ -88,6 +88,10 @@ end
     @test focal.data.mrca[1] == "Alpha"
     @test focal.data.mrca_depth[1] == 4
     @test isnan(focal.data.distance[4])
+    # An unresolved community taxon has no MRCA depth (R: NA), not depth 0.
+    @test ismissing(focal.data.mrca_depth[4])
+    @test focal.data.mrca[4] === nothing
+    @test focal.data.mrca_depth[1:3] == [4, 3, 2]
     @test focal_distances("Missing", ["Alpha"]) === nothing
 
     @test lineage_depth("Alpha") == 4

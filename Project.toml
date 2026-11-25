@@ -1,6 +1,6 @@
 name = "Taxodist"
 uuid = "2a6cfb44-98ac-4197-aa53-d0b51c850e65"
-version = "1.0.0"
+version = "1.1.0"
 authors = ["Rodrigo Fonseca Villa <rodrigo03.villa@gmail.com>"]
 
 [deps]

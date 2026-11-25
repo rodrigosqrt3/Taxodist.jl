@@ -339,8 +339,7 @@ function taxo_heatmap(
         return matrix
     end
 
-    cluster = Clustering.hclust(Matrix(matrix); linkage=:average, branchorder=:r)
-    order = cluster.order
+    order = _hclust(matrix.values, "average").order
     labels = matrix.taxa[order]
     values = matrix.values[order, order]
     options = merge(

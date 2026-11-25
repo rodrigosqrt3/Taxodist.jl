@@ -84,16 +84,38 @@ end
     @test Taxodist._lineage_from_page(empty_block, "1") == ["Natura", "Beta"]
 end
 
-@testset "Text fallback parser matches R on real pages" begin
-    expected = read_expected("expected_text_fallback.json")
-    for (id, lineage) in expected
-        html = replace(
-            fixture_html("tree_$(id).html"),
-            "id=\"ctl00_cphTabContent_divHierarchy\"" => "id=\"hierarchy_removed\"";
-            count=1,
-        )
-        @test Taxodist._lineage_from_page(html, id) == lineage
+@testset "Text fallback strips no-break-space indentation (shared fixture)" begin
+    # expected_text_fallback.json is shared with the R and Python
+    # implementations: every fixture is parsed with its structured hierarchy
+    # block removed, so the plain-text fallback parser is used. It stores the
+    # raw lineage (before trimming at Biota) and the ranks (null = missing).
+    expected = Taxodist.JSON3.read(fixture_html("expected_text_fallback.json"))
+    @test length(expected) > 5
+    for (key, entry) in pairs(expected)
+        id = String(key)
+        html = replace(fixture_html("tree_$(id).html"), "ctl00_cphTabContent_divHierarchy" => "xxHier")
+        parsed = Taxodist._lineage_and_ranks_from_page(html, id)
+        @test parsed.nodes == String.(collect(entry.lineage))
+        @test Taxodist._lineage_from_page(html, id) == String.(collect(entry.lineage))
+        expected_ranks = [rank === nothing ? missing : String(rank) for rank in entry.ranks]
+        @test isequal(collect(parsed.ranks), expected_ranks)
+        # Rank labels must never be read as nodes.
+        @test !any(node -> occursin(r"^(Clade|Domain|Kingdom|Phylum|Class|Order|Family)( |$)", node),
+                   parsed.nodes)
     end
+    # The indentation of the text tree is made of no-break spaces.
+    html = """
+    <div id="ctl00_divSubject"><b>Beta</b></div>
+    <div id="divPageContent">
+    Natura
+      Domain Eukaryota
+        Clade Beta Author, 1900
+    </div>
+    """
+    parsed = Taxodist._lineage_and_ranks_from_page(html, "1")
+    @test parsed.nodes == ["Natura", "Eukaryota", "Beta"]
+    @test Taxodist._parse_lineage_text(Taxodist._parse_document(html), "Beta", "1") == parsed.nodes
+    @test isequal(collect(parsed.ranks), [missing, "Domain", "Clade"])
 end
 
 @testset "get_lineage_by_id uses the structured parser and caches both variants" begin

@@ -18,4 +18,7 @@ Taxodist.MIN_INTERVAL[] = 0.0
     include("test_parser.jl")
     include("test_regressions.jl")
     include("test_metrics.jl")
+    include("test_hclust.jl")
+    include("test_sources.jl")
+    include("test_community.jl")
 end

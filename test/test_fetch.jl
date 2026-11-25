@@ -121,12 +121,20 @@ end
     @test !Taxodist._contains_word("Gallusian clade", "Gallus")
 end
 
+@testset "User agent follows the shared format" begin
+    @test Taxodist._user_agent ==
+          "taxodist/$(pkgversion(Taxodist)) (Julia; +https://taxodist.github.io)"
+    @test occursin(r"^taxodist/\d+\.\d+\.\d+\S* \(Julia; \+https://taxodist\.github\.io\)$",
+                   Taxodist._user_agent)
+end
+
 @testset "HTTP request handling" begin
     original = Taxodist._http_get[]
     original_parser = Taxodist._search_parser[]
     try
         function mock_ok(url, headers; kwargs...)
-            @test headers == ["User-Agent" => "taxodist Julia package/$(Taxodist.TAXODIST_VERSION)"]
+            @test headers == ["User-Agent" =>
+                "taxodist/$(Taxodist.TAXODIST_VERSION) (Julia; +https://taxodist.github.io)"]
             @test kwargs[:status_exception] === false
             @test kwargs[:retry] === false
             # HTTP.jl 1.x timeouts (request_timeout only exists in HTTP.jl 2).
@@ -454,6 +462,26 @@ end
     @test_throws ArgumentError taxo_resolve([1, 2]; progress=false)
     @test_throws ArgumentError taxo_resolve(["Alpha", ""]; progress=false)
     @test_throws ArgumentError taxo_resolve(["Alpha"]; ambiguity="guess", progress=false)
+    # Exact values only: no case folding, no symbols.
+    for bad in ("WARN", "First", " error", :warn, nothing)
+        @test_throws r"ambiguity must be \"warn\", \"first\", or \"error\"; got" taxo_resolve(
+            ["Alpha"]; ambiguity=bad, progress=false,
+        )
+    end
+end
+
+@testset "taxon names treat Unicode spaces as whitespace" begin
+    normalize = Taxodist._normalise_space
+    @test normalize(" Homo  sapiens ") == "Homo sapiens"
+    @test normalize("\tHomo  sapiens\n") == "Homo sapiens"
+    @test normalize("Homo sapiens") == "Homo sapiens"
+    @test normalize("Homo　sapiens\r\n") == "Homo sapiens"
+    @test Taxodist._trim_unicode("  Homo sapiens  ") == "Homo sapiens"
+    # Lookups share one cache key whatever the whitespace.
+    clear_cache()
+    Taxodist._taxodist_cache["id_Homo sapiens"] = nothing
+    @test Taxodist._lookup_taxonomicon_id(" Homo sapiens\t").status == "not_found"
+    clear_cache()
 end
 
 @testset "Offline resolutions" begin

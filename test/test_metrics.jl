@@ -319,7 +319,8 @@ end
     @test cd(ancestor, descendant, "path").metric == "path"
     @test cd(ancestor, descendant, "reciprocal").metric == "reciprocal"
     @test Taxodist._distance_value(ancestor, other; metric="wu_palmer") == 1
-    @test Taxodist._prefix_distance([1, 2], [3], :ranked) == Inf
+    @test Taxodist._metric_value(0, 2, 1, :ranked) == Inf
+    @test Taxodist._metric_value(1, 3, 3, "path") == 4.0
 
     # Ranked distances on reduced lineages; the MRCA refers to the full ones.
     ranked_a = (nodes=["Biota", "Animalia", "Felidae", "A"],
@@ -378,6 +379,16 @@ end
     @test_throws r"requires the rank" distance_matrix(plain; metric="ranked", progress=false)
     @test_throws r"Unknown distance metric" distance_matrix(plain; metric="nope", progress=false)
     @test_throws ArgumentError distance_matrix(plain; metric=1, progress=false)
+    # metric must be a single string, as in R and Python.
+    # (A single Symbol stays accepted, as in 1.0.)
+    for bad in (["path", "reciprocal"], [:path], ("path",), nothing)
+        @test_throws r"metric must be a single string, one of \"reciprocal\"" distance_matrix(
+            plain; metric=bad, progress=false,
+        )
+    end
+    @test_throws r"Unknown distance metric \"Path\". Use one of" taxo_distance(
+        "A", "B"; metric="Path",
+    )
 
     # A resolution without a ranks column (e.g. a schema 1.0 bundle).
     no_column = TaxodistResolution(
@@ -587,6 +598,22 @@ end
     @test presence.Delta_star ≈ presence.Delta_plus
     @test taxo_distinctness((a=2, b=1, c=1), d).data.Delta == out.data.Delta
     @test taxo_distinctness(["a" => 2, "b" => 1, "c" => 1], d).data.Delta == out.data.Delta
+
+    # Display like R's print.taxodist_distinctness(); destructuring as before.
+    @test out isa TaxodistDistinctness
+    shown = sprint(show, MIME"text/plain"(), out)
+    @test startswith(shown, "Taxonomic distinctness\n")
+    @test !occursin("Metric:", shown)
+    @test occursin("Delta_plus", shown) && occursin("sample", shown)
+    metric, data = out
+    @test metric === nothing && data === out.data
+    @test first(out) === nothing && iterate(out, 3) === nothing
+    @test propertynames(out) == (:metric, :data)
+    @test keys(out) == (:metric, :data)
+    @test out[:data] === out.data && out[2] === out.data && out[1] === nothing
+    ranked_d = TaxonomicDistanceMatrix([0 1 3; 1 0 3; 3 3 0], ["a", "b", "c"]; metric="ranked")
+    @test occursin("Taxonomic distinctness\nMetric: ranked\n",
+                   sprint(show, MIME"text/plain"(), taxo_distinctness(["a", "b"], ranked_d)))
 end
 
 @testset "taxo_distinctness matches R (and vegan::taxondive)" begin

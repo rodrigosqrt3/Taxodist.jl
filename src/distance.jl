@@ -31,11 +31,14 @@ const RANK_LEVELS = Ref{Vector{String}}(collect(DEFAULT_RANK_LEVELS))
 """
     _match_metric(metric)
 
-Validate a metric name (a string or symbol) and return it as a `String`.
+Validate a metric name, which must be a single string (a `Symbol` such as
+`:path` is also accepted, as in 1.0), and return it as a `String`. Vectors
+and other values are rejected. Messages follow R's `.match_metric()`.
 """
 function _match_metric(metric)
     metric isa Union{AbstractString,Symbol} || throw(ArgumentError(
-        "metric must be one of $(join(repr.(DISTANCE_METRICS), ", ", ", or ")).",
+        "metric must be a single string, one of " *
+        "$(join(repr.(DISTANCE_METRICS), ", ", ", or ")).",
     ))
     name = String(metric)
     name in DISTANCE_METRICS || throw(ArgumentError(
@@ -228,10 +231,12 @@ end
 """
     taxo_distance(taxon_a, taxon_b; verbose=false, metric="reciprocal")
 
-Retrieve two lineages and compute their taxonomic hierarchy distance. Returns
-a named tuple with `distance`, `mrca`, `mrca_depth`, `depth_a`, `depth_b`,
-`taxon_a`, `taxon_b`, and `metric`, or `nothing` when either taxon cannot be
-found.
+Retrieve two lineages from The Taxonomicon and compute their taxonomic
+hierarchy distance. Returns a named tuple with `distance`, `mrca`,
+`mrca_depth`, `depth_a`, `depth_b`, `taxon_a`, `taxon_b`, and `metric`, or
+`nothing` when either taxon cannot be found. For the Open Tree or NCBI
+taxonomies, resolve the taxa with `taxo_resolve(taxa; source="ott")` (or
+`"ncbi"`) and pass the resolution to [`distance_matrix`](@ref).
 
 # Metrics
 
@@ -290,23 +295,28 @@ function mrca(taxon_a, taxon_b; verbose::Bool=false)
 end
 
 """
-    TaxonomicDistanceMatrix(values, taxa; metric=nothing)
+    TaxonomicDistanceMatrix(values, taxa; metric=nothing, method=nothing)
 
 A square taxonomic-distance matrix that preserves taxon labels and supports
 both integer indexing (`matrix[1, 2]`) and label indexing
 (`matrix["Carnotaurus", "Tyrannosaurus"]`). The `metric` field records the
 distance metric (`nothing` when unknown), like the `"method"` attribute of
-R's `dist` objects.
+R's `dist` objects. The `method` field is `nothing` for distances between
+taxa; for dissimilarities between samples (`taxo_dissimilarity`), whose
+labels are sample names, it is the index (`"gamma_plus"` or `"theta_plus"`)
+and `metric` is the metric of the underlying taxon distances.
 """
 struct TaxonomicDistanceMatrix <: AbstractMatrix{Float64}
     values::Matrix{Float64}
     taxa::Vector{String}
     metric::Union{Nothing,String}
+    method::Union{Nothing,String}
 
     function TaxonomicDistanceMatrix(
         values::AbstractMatrix{<:Real},
         taxa::AbstractVector{<:AbstractString};
         metric::Union{Nothing,AbstractString,Symbol}=nothing,
+        method::Union{Nothing,AbstractString}=nothing,
     )
         size(values, 1) == size(values, 2) || throw(ArgumentError(
             "A taxonomic distance matrix must be square.",
@@ -318,8 +328,14 @@ struct TaxonomicDistanceMatrix <: AbstractMatrix{Float64}
             Matrix{Float64}(values),
             String.(taxa),
             metric === nothing ? nothing : String(metric),
+            method === nothing ? nothing : String(method),
         )
     end
+
+    # Internal: wrap freshly computed values without copying them.
+    TaxonomicDistanceMatrix(
+        ::Val{:nocopy}, values::Matrix{Float64}, taxa::Vector{String}, metric::String,
+    ) = new(values, taxa, metric, nothing)
 end
 
 Base.size(matrix::TaxonomicDistanceMatrix) = size(matrix.values)
@@ -341,6 +357,7 @@ end
 
 function Base.show(io::IO, ::MIME"text/plain", matrix::TaxonomicDistanceMatrix)
     println(io, "$(size(matrix, 1))×$(size(matrix, 2)) TaxonomicDistanceMatrix")
+    matrix.method === nothing || println(io, "method: ", matrix.method)
     matrix.metric === nothing || println(io, "metric: ", matrix.metric)
     isempty(matrix.taxa) || println(io, "taxa: ", join(matrix.taxa, ", "))
     show(io, MIME"text/plain"(), matrix.values)
@@ -351,8 +368,10 @@ end
 
 Retrieve the requested lineages and calculate a symmetric labeled distance
 matrix with the given metric (see `taxo_distance`), recorded in its `metric`
-field. `taxa` may be a vector of names, a `TaxodistResolution` whose stored
-lineages (and ranks) are reused without retrieval, or a `TaxodistBundle`
+field. `taxa` may be a vector of names (retrieved from The Taxonomicon), a
+`TaxodistResolution` from any source (`taxo_resolve(taxa; source="ott")` or
+`"ncbi"`) whose stored lineages (and ranks) are reused without retrieval, or a
+`TaxodistBundle`
 whose validated stored matrix is returned (`metric` is then ignored).
 Unresolved taxa receive `NaN` in their off-diagonal comparisons.
 """
@@ -416,13 +435,68 @@ function _prefix_node_ids(lineages)
     return ids, missing_mask
 end
 
-function _prefix_distance(ids_a::Vector{Int}, ids_b::Vector{Int}, metric::Symbol=:reciprocal)
-    common = min(length(ids_a), length(ids_b))
-    depth = 0
-    @inbounds while depth < common && ids_a[depth + 1] == ids_b[depth + 1]
-        depth += 1
+"""
+    _MrcaIndex
+
+Index for MRCA-depth queries, mirroring R's `.mrca_index()`. Lineages are
+sorted lexicographically by their node identifiers (a missing depth sorts
+before every node, so a lineage precedes its descendants); in that order the
+common prefix of two lineages is the minimum of the common prefixes of all
+adjacent lineages between them, as in the LCP table of a suffix array. The
+depths from one lineage to all others therefore follow from two running
+minima, in O(n) per lineage instead of a node-by-node comparison of every
+pair.
+
+- `order`: lineage at each sorted position;
+- `pos`: sorted position of each lineage;
+- `adj`: common prefix of sorted neighbours (length `n - 1`);
+- `lens`: number of nodes of each lineage.
+"""
+struct _MrcaIndex
+    order::Vector{Int}
+    pos::Vector{Int}
+    adj::Vector{Int}
+    lens::Vector{Int}
+end
+
+function _mrca_index(ids::AbstractVector{Vector{Int}})
+    n = length(ids)
+    lens = Int[length(path) for path in ids]
+    # `isless` on integer vectors is lexicographic with a proper prefix first,
+    # which equals R's order on identifiers padded with 0 (identifiers are
+    # positive); the stable sort keeps duplicates in input order.
+    order = sortperm(ids; alg=Base.Sort.DEFAULT_STABLE)
+    adj = Vector{Int}(undef, max(n - 1, 0))
+    @inbounds for k in 1:(n - 1)
+        adj[k] = _common_prefix_depth(ids[order[k]], ids[order[k + 1]])
     end
-    return _metric_value(depth, length(ids_a), length(ids_b), metric)
+    pos = Vector{Int}(undef, n)
+    pos[order] = 1:n
+    return _MrcaIndex(order, pos, adj, lens)
+end
+
+"""
+    _mrca_depths_from(index, j)
+
+MRCA depths from lineage `j` to every lineage of `index`, in input order. The
+depth of a lineage with itself is its length.
+"""
+function _mrca_depths_from(index::_MrcaIndex, j::Integer)
+    n = length(index.order)
+    p = index.pos[j]
+    sorted = Vector{Int}(undef, n)
+    sorted[p] = index.lens[j]
+    running = typemax(Int)
+    @inbounds for q in (p + 1):n
+        running = min(running, index.adj[q - 1])
+        sorted[q] = running
+    end
+    running = typemax(Int)
+    @inbounds for q in (p - 1):-1:1
+        running = min(running, index.adj[q])
+        sorted[q] = running
+    end
+    return sorted[index.pos]
 end
 
 function _distance_matrix_from_lineages(labels, lineages; metric::AbstractString="reciprocal")
@@ -430,20 +504,40 @@ function _distance_matrix_from_lineages(labels, lineages; metric::AbstractString
     length(lineages) == n_taxa || throw(ArgumentError(
         "The number of lineages must match the number of labels.",
     ))
-    metric_symbol = Symbol(metric)
     ids, missing_mask = _prefix_node_ids(lineages)
+    values = _pairwise_values(_mrca_index(ids), missing_mask, Symbol(metric))
+    return TaxonomicDistanceMatrix(Val(:nocopy), values, String.(labels), String(metric))
+end
+
+# Square matrix of distances from an MRCA index. Column `a` is filled from
+# the running minima of `adj` to the right and to the left of the sorted
+# position of lineage `a` (column-wise writes keep the fill cache-friendly).
+# Unresolved lineages give NaN off the diagonal.
+function _pairwise_values(index::_MrcaIndex, missing_mask::AbstractVector{Bool}, metric::Symbol)
+    order, adj, lens = index.order, index.adj, index.lens
+    n_taxa = length(order)
     values = Matrix{Float64}(undef, n_taxa, n_taxa)
-    @inbounds for j in 1:n_taxa
-        values[j, j] = 0.0
-        for i in (j + 1):n_taxa
-            value = missing_mask[i] || missing_mask[j] ? NaN :
-                _prefix_distance(ids[i], ids[j], metric_symbol)
-            values[i, j] = value
-            values[j, i] = value
+    @inbounds for p in 1:n_taxa
+        a = order[p]
+        length_a = lens[a]
+        missing_a = missing_mask[a]
+        values[a, a] = 0.0
+        running = typemax(Int)
+        for q in (p + 1):n_taxa
+            running = min(running, adj[q - 1])
+            b = order[q]
+            values[b, a] = missing_a || missing_mask[b] ? NaN :
+                _metric_value(running, lens[b], length_a, metric)
+        end
+        running = typemax(Int)
+        for q in (p - 1):-1:1
+            running = min(running, adj[q])
+            b = order[q]
+            values[b, a] = missing_a || missing_mask[b] ? NaN :
+                _metric_value(running, lens[b], length_a, metric)
         end
     end
-
-    return TaxonomicDistanceMatrix(values, labels; metric=metric)
+    return values
 end
 
 """
@@ -546,8 +640,10 @@ end
 
 Compute the rectangular matrix of taxonomic distances from every taxon in `x`
 to every taxon in `y` (for example, community members to reference taxa)
-without computing the full square matrix. `x` and `y` may be vectors of names,
-`TaxodistResolution`s, or `TaxodistBundle`s. `metric` is one of the metrics
+without computing the full square matrix. `x` and `y` may be vectors of names
+(retrieved from The Taxonomicon), `TaxodistResolution`s from any source, or
+`TaxodistBundle`s; distances are only meaningful when both come from the same
+source. `metric` is one of the metrics
 of `taxo_distance`. Unresolved taxa receive `NaN`; taxa without a common
 ancestor receive `Inf` (1 under `"wu_palmer"`).
 """
@@ -559,14 +655,28 @@ function cross_distances(x, y; verbose::Bool=false, progress::Bool=true, metric=
     reduced_x = _metric_lineages(lineages_x, rows, metric)
     reduced_y = _metric_lineages(lineages_y, columns, metric)
     ids, missing_mask = _prefix_node_ids(vcat(reduced_x, reduced_y))
-    n_x = length(rows)
-    metric_symbol = Symbol(metric)
-    values = Matrix{Float64}(undef, n_x, length(columns))
-    for j in eachindex(columns), i in 1:n_x
-        values[i, j] = missing_mask[i] || missing_mask[n_x + j] ? NaN :
-            _prefix_distance(ids[i], ids[n_x + j], metric_symbol)
-    end
+    values = _cross_values(
+        _mrca_index(ids), missing_mask, length(rows), length(columns), Symbol(metric),
+    )
     return TaxonomicCrossDistances(values, rows, columns)
+end
+
+# Distances from the first `n_x` lineages of `index` (rows) to the next `n_y`
+# (columns), one column per query of the index; unresolved taxa give NaN.
+function _cross_values(index::_MrcaIndex, missing_mask::AbstractVector{Bool},
+                       n_x::Int, n_y::Int, metric::Symbol)
+    values = fill(NaN, n_x, n_y)
+    for j in 1:n_y
+        column = n_x + j
+        missing_mask[column] && continue
+        depths = _mrca_depths_from(index, column)
+        length_column = index.lens[column]
+        @inbounds for i in 1:n_x
+            missing_mask[i] && continue
+            values[i, j] = _metric_value(depths[i], index.lens[i], length_column, metric)
+        end
+    end
+    return values
 end
 
 """
@@ -622,7 +732,8 @@ end
 Calculate the distance (under `metric`, see `taxo_distance`) and MRCA from one
 focal taxon to every requested taxon. The return value is a named tuple
 containing the focal label and a `DataFrame` in its `data` field, sorted by
-distance with unresolved taxa (`NaN`) last. With `progress` (and `verbose`),
+distance with unresolved taxa last; these have distance `NaN`, `mrca`
+`nothing`, and `mrca_depth` `missing` (R's `NA`). With `progress` (and `verbose`),
 one line is printed per taxon.
 """
 function focal_distances(
@@ -644,7 +755,7 @@ function focal_distances(
         taxon=String[],
         distance=Float64[],
         mrca=Union{Nothing,String}[],
-        mrca_depth=Int[],
+        mrca_depth=Union{Missing,Int}[],
     )
 
     n_taxa = length(taxa)
@@ -658,7 +769,7 @@ function focal_distances(
                 taxon=taxon,
                 distance=NaN,
                 mrca=nothing,
-                mrca_depth=0,
+                mrca_depth=missing,
             ))
             continue
         end
@@ -725,16 +836,239 @@ function _invalid_matrix_reason(matrix::TaxonomicDistanceMatrix)
     return nothing
 end
 
+# Clustering methods: the name accepted by taxo_cluster() (case-insensitive),
+# the linkage symbol recorded in the result, and the method code of R's
+# Fortran HCLUST routine (ward.D = 1, single = 2, complete = 3, average = 4,
+# mcquitty = 5, median = 6, centroid = 7, ward.D2 = 8).
 const _linkage_aliases = Dict(
-    "single" => :single,
-    "average" => :average,
-    "complete" => :complete,
-    "ward" => :ward,
-    "ward_presquared" => :ward_presquared,
-    # Names used by R's stats::hclust() for the same criteria.
-    "ward.d2" => :ward,
-    "ward.d" => :ward_presquared,
+    "ward.d" => (:ward_presquared, 1),
+    "ward_presquared" => (:ward_presquared, 1),
+    "single" => (:single, 2),
+    "complete" => (:complete, 3),
+    "average" => (:average, 4),
+    "mcquitty" => (:mcquitty, 5),
+    "median" => (:median, 6),
+    "centroid" => (:centroid, 7),
+    "ward.d2" => (:ward, 8),
+    "ward" => (:ward, 8),
 )
+
+# Position of the pair (i, j), i < j, in R's `dist` storage (Fortran IOFFST).
+@inline _ioffst(n::Int, i::Int, j::Int) = j + (i - 1) * n - (i * (i + 1)) ÷ 2
+
+"""
+    _hclust_merges(diss, n, iopt)
+
+Line-by-line port of the Fortran routine `HCLUST` of R's `stats` package
+(F. Murtagh; R Core Team), which `stats::hclust()` calls: the nearest-
+neighbour agglomeration with the Lance-Williams update of method `iopt`.
+`diss` holds the dissimilarities in `dist` storage and is overwritten.
+Returns the agglomeration history `ia`, `ib` and the heights `crit`. Ties are
+broken exactly as in R, so that merges and leaf order are identical.
+"""
+function _hclust_merges(diss::Vector{Float64}, n::Int, iopt::Int)
+    inf = 1.0e300
+    ia = zeros(Int, n)
+    ib = zeros(Int, n)
+    crit = zeros(Float64, n)
+    membr = ones(Float64, n)
+    nn = zeros(Int, n)
+    disnn = zeros(Float64, n)
+    flag = trues(n)
+    im = 0
+    jj = 0
+    jm = 0
+    ncl = n
+    if iopt == 8  # Ward "D2": squared dissimilarities
+        for i in eachindex(diss)
+            diss[i] = diss[i] * diss[i]
+        end
+    end
+
+    # Nearest neighbour of each point to its right.
+    for i in 1:(n - 1)
+        dmin = inf
+        for j in (i + 1):n
+            ind = _ioffst(n, i, j)
+            if dmin > diss[ind]
+                dmin = diss[ind]
+                jm = j
+            end
+        end
+        nn[i] = jm
+        disnn[i] = dmin
+    end
+
+    is_ward = iopt == 1 || iopt == 8
+    while true
+        # Least dissimilarity in the list of nearest neighbours.
+        dmin = inf
+        for i in 1:(n - 1)
+            if flag[i] && disnn[i] < dmin
+                dmin = disnn[i]
+                im = i
+                jm = nn[i]
+            end
+        end
+        ncl -= 1
+
+        i2 = min(im, jm)
+        j2 = max(im, jm)
+        ia[n - ncl] = i2
+        ib[n - ncl] = j2
+        iopt == 8 && (dmin = sqrt(dmin))
+        crit[n - ncl] = dmin
+        flag[j2] = false
+
+        # Dissimilarities from the new cluster.
+        dmin = inf
+        for k in 1:n
+            (flag[k] && k != i2) || continue
+            ind1 = i2 < k ? _ioffst(n, i2, k) : _ioffst(n, k, i2)
+            ind2 = j2 < k ? _ioffst(n, j2, k) : _ioffst(n, k, j2)
+            d12 = diss[_ioffst(n, i2, j2)]
+            if is_ward
+                diss[ind1] = (membr[i2] + membr[k]) * diss[ind1] +
+                             (membr[j2] + membr[k]) * diss[ind2] - membr[k] * d12
+                diss[ind1] = diss[ind1] / (membr[i2] + membr[j2] + membr[k])
+            elseif iopt == 2
+                diss[ind1] = min(diss[ind1], diss[ind2])
+            elseif iopt == 3
+                diss[ind1] = max(diss[ind1], diss[ind2])
+            elseif iopt == 4
+                diss[ind1] = (membr[i2] * diss[ind1] + membr[j2] * diss[ind2]) /
+                             (membr[i2] + membr[j2])
+            elseif iopt == 5
+                diss[ind1] = (diss[ind1] + diss[ind2]) / 2
+            elseif iopt == 6
+                diss[ind1] = ((diss[ind1] + diss[ind2]) - d12 / 2) / 2
+            else  # iopt == 7, unweighted centroid
+                diss[ind1] = (membr[i2] * diss[ind1] + membr[j2] * diss[ind2] -
+                              membr[i2] * membr[j2] * d12 / (membr[i2] + membr[j2])) /
+                             (membr[i2] + membr[j2])
+            end
+
+            if i2 < k
+                if diss[ind1] < dmin
+                    dmin = diss[ind1]
+                    jj = k
+                end
+            elseif diss[ind1] < disnn[k]
+                # Fix for non-monotone methods (centroid, median): k may now
+                # have i2 as its nearest neighbour.
+                disnn[k] = diss[ind1]
+                nn[k] = i2
+            end
+        end
+        membr[i2] = membr[i2] + membr[j2]
+        disnn[i2] = dmin
+        nn[i2] = jj
+
+        # Update the nearest neighbours that pointed to i2 or j2.
+        for i in 1:(n - 1)
+            if flag[i] && (nn[i] == i2 || nn[i] == j2)
+                dmin = inf
+                for j in (i + 1):n
+                    if flag[j]
+                        ind = _ioffst(n, i, j)
+                        if diss[ind] < dmin
+                            dmin = diss[ind]
+                            jj = j
+                        end
+                    end
+                end
+                nn[i] = jj
+                disnn[i] = dmin
+            end
+        end
+        ncl > 1 || break
+    end
+    return ia, ib, crit
+end
+
+"""
+    _hclust_order(ia, ib, n)
+
+Port of the Fortran routine `HCASS2` of R's `stats` package: converts the
+agglomeration history into R's `merge` matrix (singletons negative, clusters
+by merge step) and computes the leaf `order` of the dendrogram.
+"""
+function _hclust_order(ia::Vector{Int}, ib::Vector{Int}, n::Int)
+    iia = copy(ia)
+    iib = copy(ib)
+    for i in 1:(n - 2)
+        k = min(ia[i], ib[i])
+        for j in (i + 1):(n - 1)
+            ia[j] == k && (iia[j] = -i)
+            ib[j] == k && (iib[j] = -i)
+        end
+    end
+    for i in 1:(n - 1)
+        iia[i] = -iia[i]
+        iib[i] = -iib[i]
+    end
+    for i in 1:(n - 1)
+        if iia[i] > 0 && iib[i] < 0
+            iia[i], iib[i] = iib[i], iia[i]
+        end
+        if iia[i] > 0 && iib[i] > 0
+            iia[i], iib[i] = min(iia[i], iib[i]), max(iia[i], iib[i])
+        end
+    end
+
+    iorder = zeros(Int, n)
+    iorder[1] = iia[n - 1]
+    iorder[2] = iib[n - 1]
+    loc = 2
+    for i in (n - 2):-1:1
+        for j in 1:loc
+            iorder[j] == i || continue
+            # Replace cluster i by its two members.
+            iorder[j] = iia[i]
+            loc += 1
+            for k in loc:-1:(j + 2)
+                iorder[k] = iorder[k - 1]
+            end
+            iorder[j + 1] = iib[i]
+            break
+        end
+    end
+    merges = hcat(iia[1:(n - 1)], iib[1:(n - 1)])
+    return merges, -iorder
+end
+
+"""
+    _hclust(values, method)
+
+Hierarchical clustering of the square dissimilarity matrix `values` (its
+lower triangle is used, as `as.dist()` does in R) with the same algorithm as
+R's `stats::hclust()`, so that heights, merges, and leaf order are identical
+to R's for all eight methods, ties included. Returns a `Clustering.Hclust`.
+"""
+function _hclust(values::AbstractMatrix{<:Real}, method::AbstractString="complete")
+    linkage, iopt = _clustering_method(method)
+    n = size(values, 1)
+    n >= 2 || throw(ArgumentError("At least two objects are required for clustering."))
+    diss = Vector{Float64}(undef, n * (n - 1) ÷ 2)
+    for i in 1:(n - 1), j in (i + 1):n
+        diss[_ioffst(n, i, j)] = values[j, i]
+    end
+    ia, ib, crit = _hclust_merges(diss, n, iopt)
+    merges, order = _hclust_order(ia, ib, n)
+    return Clustering.Hclust(merges, crit[1:(n - 1)], order, linkage)
+end
+
+function _clustering_method(method)
+    entry = method isa Union{AbstractString,Symbol} ?
+        get(_linkage_aliases, lowercase(String(method)), nothing) : nothing
+    entry === nothing && throw(ArgumentError(
+        "Unsupported clustering method: $(repr(method)). Valid methods are R's " *
+        "\"ward.D\", \"single\", \"complete\", \"average\", \"mcquitty\", \"median\", " *
+        "\"centroid\", and \"ward.D2\"; \"ward\" is an alias of \"ward.D2\" and " *
+        "\"ward_presquared\" of \"ward.D\".",
+    ))
+    return entry
+end
 
 """
     taxo_cluster(taxa; method="average", kwargs...)
@@ -742,20 +1076,16 @@ const _linkage_aliases = Dict(
 Compute a taxonomic distance matrix and perform hierarchical clustering.
 `taxa` may also be an existing `TaxonomicDistanceMatrix`. Other keyword
 arguments (`verbose`, `progress`, `metric`) are passed to `distance_matrix`;
-the metric used is recorded in `dist.metric`. `method` is one of
-the linkages supported by Clustering.jl: `"single"`, `"complete"`,
-`"average"` (UPGMA, the default), `"ward"` (R's `"ward.D2"`), or
-`"ward_presquared"` (R's `"ward.D"`). R's `"mcquitty"`, `"median"`, and
-`"centroid"` are not available.
+the metric used is recorded in `dist.metric`. `method` is one of R's
+`stats::hclust()` methods: `"ward.D"`, `"single"`, `"complete"`, `"average"`
+(UPGMA, the default), `"mcquitty"`, `"median"`, `"centroid"`, or
+`"ward.D2"`; `"ward"` is accepted for `"ward.D2"` and `"ward_presquared"` for
+`"ward.D"`. The clustering uses a port of R's algorithm, so heights, merges,
+and leaf order equal R's, also when distances are tied. `hclust` is a
+`Clustering.Hclust` (fields `merges`, `heights`, `order`, `linkage`).
 """
 function taxo_cluster(taxa; method="average", kwargs...)
-    linkage = get(_linkage_aliases, lowercase(string(method)), nothing)
-    linkage === nothing && throw(ArgumentError(
-        "Unsupported clustering method: $(repr(method)). Valid methods are \"single\", " *
-        "\"complete\", \"average\", \"ward\" (alias \"ward.D2\"), and \"ward_presquared\" " *
-        "(alias \"ward.D\"); R's \"mcquitty\", \"median\", and \"centroid\" are not " *
-        "supported by Clustering.jl.",
-    ))
+    linkage, _ = _clustering_method(method)
     matrix = _analysis_matrix(taxa; kwargs...)
 
     reason = _invalid_matrix_reason(matrix)
@@ -770,12 +1100,7 @@ function taxo_cluster(taxa; method="average", kwargs...)
         return (hclust=nothing, dist=matrix, method=linkage)
     end
 
-    result = Clustering.hclust(
-        Matrix(matrix);
-        linkage=linkage,
-        branchorder=:r,
-    )
-    return (hclust=result, dist=matrix, method=linkage)
+    return (hclust=_hclust(matrix.values, String(method)), dist=matrix, method=linkage)
 end
 
 function _pcoa(matrix::TaxonomicDistanceMatrix, k::Int)

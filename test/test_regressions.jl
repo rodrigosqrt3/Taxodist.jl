@@ -101,15 +101,18 @@ end
     @test taxo_cluster(matrix; method="ward.D2").method == :ward
     @test taxo_cluster(matrix; method="ward.D").method == :ward_presquared
     @test taxo_cluster(matrix; method=:complete).method == :complete
+    @test taxo_cluster(matrix; method="median").method == :median
     error = try
-        taxo_cluster(matrix; method="median")
+        taxo_cluster(matrix; method="medoid")
         nothing
     catch caught
         caught
     end
     @test error isa ArgumentError
     message = sprint(showerror, error)
-    @test all(name -> occursin(name, message), ["single", "complete", "average", "ward"])
+    @test all(name -> occursin(name, message), [
+        "ward.D", "single", "complete", "average", "mcquitty", "median", "centroid", "ward.D2",
+    ])
 end
 
 @testset "Bundle JSON numbers are validated" begin

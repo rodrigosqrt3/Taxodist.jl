@@ -108,12 +108,13 @@ function _metric_from_spec(spec)
 end
 
 """
-    taxo_bundle(taxa; ambiguity="warn", verbose=false, progress=true, within=nothing, metric="reciprocal")
+    taxo_bundle(taxa; ambiguity="warn", verbose=false, progress=true, within=nothing,
+                metric="reciprocal", source="taxonomicon")
 
 Combine an auditable resolution, its distance matrix, the shared metric
 definition, and provenance in one portable object (schema 1.1). `ambiguity`,
-`verbose`, `progress`, and `within` are passed to `taxo_resolve` for a vector
-of names. `metric` (see `taxo_distance`) is used for the stored matrix and
+`verbose`, `progress`, `within`, and `source` are passed to `taxo_resolve` for
+a vector of names; the bundle records the source of the resolution. `metric` (see `taxo_distance`) is used for the stored matrix and
 recorded in the bundle, together with the rank levels for `"ranked"`, so
 that the matrix can be verified from the stored lineages and ranks.
 """
@@ -124,6 +125,7 @@ function taxo_bundle(
     progress::Bool=true,
     within::Union{Nothing,AbstractString}=nothing,
     metric="reciprocal",
+    source="taxonomicon",
 )
     metric = _match_metric(metric)
     resolution = taxa isa TaxodistResolution ? taxa : taxo_resolve(
@@ -132,6 +134,7 @@ function taxo_bundle(
         verbose=verbose,
         progress=progress,
         within=within,
+        source=source,
     )
     source_name = isempty(strip(resolution.source)) ? "The Taxonomicon" : resolution.source
     source_url = resolution.source_url
@@ -564,14 +567,21 @@ end
     TaxodistBundleComparison
 
 Result of `compare_bundles`: `taxa` (one row per input label with the kind of
-change), `distances` (pairs whose distance changed), and the creation
-timestamps `created_old` and `created_new`.
+change), `distances` (pairs whose distance changed), the creation timestamps
+`created_old` and `created_new`, the distance metric of each bundle
+(`metric_old`, `metric_new`: `"reciprocal"`, `"path"`, `"wu_palmer"`, or
+`"ranked"`), and `metric_changed`, `true` when the bundles use different
+metrics, or the `"ranked"` metric with different rank levels. Their distances
+are then not comparable, and every pair is usually reported as changed.
 """
 struct TaxodistBundleComparison
     taxa::DataFrame
     distances::DataFrame
     created_old::Union{Nothing,String}
     created_new::Union{Nothing,String}
+    metric_old::String
+    metric_new::String
+    metric_changed::Bool
 end
 
 function Base.show(io::IO, ::MIME"text/plain", comparison::TaxodistBundleComparison)
@@ -581,11 +591,22 @@ function Base.show(io::IO, ::MIME"text/plain", comparison::TaxodistBundleCompari
     println(io, "* New bundle: $(something(comparison.created_new, "unknown"))")
     println(io, "* Taxa compared: $(nrow(comparison.taxa)) ($(nrow(changed)) changed)")
     println(io, "* Distances changed: $(nrow(comparison.distances))")
+    if comparison.metric_changed
+        if comparison.metric_old == comparison.metric_new
+            println(io, "! The bundles use different rank levels for the ",
+                    repr(comparison.metric_new), " metric.")
+        else
+            println(io, "! The bundles use different metrics: ",
+                    repr(comparison.metric_old), " and ", repr(comparison.metric_new), ".")
+        end
+    end
+    println(io)
     if nrow(changed) == 0
         print(io, "No taxon changed between the two bundles.")
     else
-        for row in eachrow(changed)
-            println(io, "> $(row.input): $(row.change)")
+        for (index, row) in enumerate(eachrow(changed))
+            print(io, "> $(row.input): $(row.change)")
+            index < nrow(changed) && println(io)
         end
     end
 end
@@ -604,7 +625,9 @@ Report how the resolution of each taxon and the pairwise distances changed
 between two bundles (or bundle JSON files), for example when an analysis is
 repeated after The Taxonomicon is updated. Each input label is classified as
 `unchanged`, `added`, `removed`, `status_changed`, `id_changed`, or
-`lineage_changed`.
+`lineage_changed`. The result also records the metric of each bundle and
+whether it changed (see `TaxodistBundleComparison`); its display warns when
+the distances are not comparable.
 """
 function compare_bundles(old, new; tolerance::Real=sqrt(eps(Float64)))
     old_bundle = _as_bundle(old, "old")
@@ -691,5 +714,10 @@ function compare_bundles(old, new; tolerance::Real=sqrt(eps(Float64)))
     end
 
     created(bundle) = bundle.created_at === nothing ? nothing : String(bundle.created_at)
-    return TaxodistBundleComparison(taxa, distances, created(old_bundle), created(new_bundle))
+    metric_old = _metric_from_spec(old_bundle.metric)
+    metric_new = _metric_from_spec(new_bundle.metric)
+    return TaxodistBundleComparison(
+        taxa, distances, created(old_bundle), created(new_bundle),
+        metric_old.metric, metric_new.metric, !isequal(metric_old, metric_new),
+    )
 end

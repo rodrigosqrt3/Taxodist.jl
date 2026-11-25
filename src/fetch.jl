@@ -27,7 +27,8 @@ const _bare_ranks = Set([
 const _astronomical_pattern =
     r"\bastronomical\b|\bplanet\b|\bMinor planet\b|\bcomet\b|\basteroid\b"i
 
-const _user_agent = "taxodist Julia package/$(TAXODIST_VERSION)"
+# Shared by the R, Python, and Julia implementations.
+const _user_agent = "taxodist/$(TAXODIST_VERSION) (Julia; +https://taxodist.github.io)"
 const _http_get = Ref{Function}(HTTP.get)
 const _sleep = Ref{Function}(sleep)
 
@@ -49,21 +50,29 @@ with `Taxodist.MIN_INTERVAL[] = 1.0`; a value of zero or less disables it.
 """
 const MIN_INTERVAL = Ref{Float64}(0.25)
 
-const _last_request = Ref{Float64}(-Inf)
+# Time of the last request to each source (host), which are spaced
+# independently.
+const _last_requests = Dict{String,Float64}()
 const _throttle_lock = ReentrantLock()
+const _throttle_sleep = Ref{Function}(sleep)
 
-function _throttle()
-    interval = MIN_INTERVAL[]
-    interval > 0 || return nothing
+function _throttle(source::AbstractString="taxonomicon", interval::Real=MIN_INTERVAL[])
+    (isnan(interval) || interval <= 0) && return nothing
     lock(_throttle_lock) do
-        wait = interval - (time() - _last_request[])
-        wait > 0 && sleep(wait)
-        _last_request[] = time()
+        wait = interval - (time() - get(_last_requests, source, -Inf))
+        wait > 0 && _throttle_sleep[](wait)
+        _last_requests[String(source)] = time()
     end
     return nothing
 end
 
-_normalise_space(text) = strip(replace(String(text), r"\s+" => " "))
+# Horizontal and vertical whitespace, ASCII and Unicode (no-break space,
+# thin space, ...), as PCRE's `\h` and `\v` (R: "[\\h\\v]").
+_trim_unicode(text) = replace(String(text), r"^[\h\v]+|[\h\v]+$" => "")
+
+# Taxon-name normalization (R's .normalize_taxon()): trim Unicode whitespace
+# and collapse every run of it to one ASCII space.
+_normalise_space(text) = replace(_trim_unicode(text), r"[\h\v]+" => " ")
 
 # R's trimws(): removes ASCII spaces, tabs, and line breaks only.
 _trimws(text) = strip(String(text), (' ', '\t', '\r', '\n'))
@@ -170,6 +179,14 @@ function _keep_lineage_node(lineage::AbstractVector, taxon::AbstractString)
     ]
 end
 
+"""
+    clear_cache()
+
+Remove every lineage, rank, and identifier stored in the session cache (for
+all taxonomic sources), so that later calls retrieve them again. Returns
+`nothing`. See also [`cache_info`](@ref), [`save_cache`](@ref), and
+[`load_cache`](@ref).
+"""
 function clear_cache()
     lock(() -> empty!(_taxodist_cache), _cache_lock)
     return nothing
@@ -257,6 +274,9 @@ function _validated_cache(raw)
                 "Invalid cache file: rank entries must be sequences of strings or nulls.",
             ))
             data[key] = _rank_vector(raw_value)
+        elseif startswith(key, "src_")
+            # Records of the Open Tree and NCBI taxonomies (see sources.jl).
+            data[key] = _source_cache_value(key, raw_value)
         elseif startswith(key, "resolved_lineage_")
             raw_value isa AbstractVector || throw(ArgumentError(
                 "Invalid cache file: resolved lineage entries must be sequences of strings.",
@@ -544,6 +564,19 @@ function _taxo_search_details(taxon; verbose::Bool=false)
     return (status="ok", results=results)
 end
 
+"""
+    taxo_search(taxon; verbose=false)
+
+Search The Taxonomicon for a taxon name and list every valid entry found, to
+inspect homonyms before choosing an identifier. Returns a `DataFrame` with
+columns `id` (the numeric Taxonomicon ID, usable in [`get_lineage`](@ref),
+[`taxo_resolve`](@ref), and the distance functions) and `name` (the entry as
+shown by The Taxonomicon, with rank and author), or `nothing` when nothing is
+found or the server cannot be reached. Astronomical objects are excluded.
+Only The Taxonomicon is searched; for the Open Tree and NCBI taxonomies, the
+candidates considered by `taxo_resolve(taxa; source="ott")` (or `"ncbi"`) are
+listed in its `candidates` column.
+"""
 function taxo_search(taxon; verbose::Bool=false)
     return _taxo_search_details(taxon; verbose=verbose).results
 end
@@ -824,7 +857,10 @@ function _parse_lineage_text_ranked(document, current_name, taxon_id::AbstractSt
 
     texts = if current_name !== nothing && !isempty(content)
         tree_text = _trimws(_xml_text(first(content)))
-        raw_lines = [String(_trimws(line)) for line in split(tree_text, '\n')]
+        # The page indents the tree with no-break spaces: trim Unicode
+        # whitespace (R: trimws(whitespace = "[\\h\\v]")), or rank prefixes
+        # would not be recognized and labels such as "Clade" would become nodes.
+        raw_lines = [String(_trim_unicode(line)) for line in split(tree_text, '\n')]
         filter!(!isempty, raw_lines)
         tree_start = findfirst(line -> startswith(line, "Natura"), raw_lines)
         tree_start === nothing || (raw_lines = raw_lines[tree_start:end])
@@ -1065,6 +1101,9 @@ function _lookup_taxonomicon_id(taxon; verbose::Bool=false)
             if any(node -> _contains_word(node, taxon_name; ignore_case=true), candidate.lineage)
         ]
         isempty(exact) || (biological = exact)
+        # As in taxo_resolve(): a nominotypical subgenus or subspecies nested
+        # in a candidate of the same name is not a homonym.
+        biological = biological[_outermost_candidates([candidate.lineage for candidate in biological])]
         biological = biological[_candidate_order([candidate.name for candidate in biological])]
     end
 
@@ -1084,9 +1123,11 @@ end
 """
     get_lineage(taxon; clean=true, verbose=false)
 
-Retrieve the lineage of a single taxon name or numeric ID. Whitespace is
-normalized and the queried name is located case-insensitively when the
-lineage is truncated.
+Retrieve the lineage of a single taxon name or numeric ID from The
+Taxonomicon, ordered from the root to the taxon. Whitespace is normalized and
+the queried name is located case-insensitively when the lineage is truncated.
+For the Open Tree or NCBI taxonomies, use `taxo_resolve(taxa; source="ott")`
+(or `"ncbi"`); its `lineage` column holds the lineages.
 """
 function get_lineage(taxon; clean::Bool=true, verbose::Bool=false)
     (taxon === nothing || ismissing(taxon)) && return nothing
@@ -1180,6 +1221,12 @@ function Base.show(io::IO, ::MIME"text/plain", resolution::TaxodistResolution)
     show(io, MIME"text/plain"(), resolution.data)
 end
 
+"""
+    summary_counts(resolution::TaxodistResolution)
+
+Count the inputs of a resolution by status. Returns a named tuple
+`(resolved, ambiguous, unresolved, retrieval_error)`.
+"""
 function summary_counts(resolution::TaxodistResolution)
     statuses = resolution.status
     return (
@@ -1265,7 +1312,8 @@ function _copy_resolution_row(row)
 end
 
 """
-    taxo_resolve(taxa; ambiguity="warn", verbose=false, progress=true, within=nothing)
+    taxo_resolve(taxa; ambiguity="warn", verbose=false, progress=true, within=nothing,
+                 source="taxonomicon")
 
 Resolve names or numeric Taxonomicon IDs (a vector, or a single string) into
 an auditable batch result. Every input is assigned one of `resolved`,
@@ -1278,9 +1326,19 @@ Names are matched after normalizing whitespace, and the stored lineage is
 truncated at the queried taxon exactly as in `get_lineage()`, so
 `distance_matrix(taxo_resolve(x))` equals `distance_matrix(x)`. When several
 candidates remain, invalid or rejected names (`nom. inval.`, `nom. rej.`, ...)
-are ranked last. `within` optionally restricts candidates to those whose
+are ranked last, and a candidate nested in another candidate of the same name
+(such as the nominotypical subgenus *Mus (Mus)* inside the genus *Mus*) is not
+counted as a homonym. `within` optionally restricts candidates to those whose
 lineage contains a clade (exact, case-insensitive); names without such a
-candidate are `unresolved`.
+candidate are `unresolved`. Numeric IDs are not filtered.
+
+`source` selects the classification: `"taxonomicon"` (The Taxonomicon,
+default), `"ott"` (Open Tree Taxonomy), or `"ncbi"` (NCBI Taxonomy); see
+`taxo_sources()`. Identifiers of the other sources carry a prefix
+(`"ott:770309"`, `"ncbi:9606"`), which may be omitted in the input. Clade
+names depend on the source (e.g. `"Animalia"` in The Taxonomicon, `"Metazoa"`
+in the other two). The resolution records the source and, for the Open Tree
+Taxonomy, its version (`resolution.source`, `resolution.source_url`).
 """
 taxo_resolve(taxon::AbstractString; kwargs...) = taxo_resolve([taxon]; kwargs...)
 
@@ -1290,11 +1348,14 @@ function taxo_resolve(
     verbose::Bool=false,
     progress::Bool=true,
     within::Union{Nothing,AbstractString}=nothing,
+    source="taxonomicon",
 )
-    policy = lowercase(String(ambiguity))
-    policy in ("warn", "first", "error") || throw(ArgumentError(
-        "ambiguity must be \"warn\", \"first\", or \"error\".",
+    # Exact values only, as in Python (no case folding).
+    (ambiguity isa AbstractString && ambiguity in ("warn", "first", "error")) || throw(ArgumentError(
+        "ambiguity must be \"warn\", \"first\", or \"error\"; got $(repr(ambiguity)).",
     ))
+    policy = String(ambiguity)
+    source = _match_source(source)
     all(taxon -> taxon isa AbstractString, taxa) || throw(ArgumentError(
         "taxa must be a vector of strings.",
     ))
@@ -1387,6 +1448,11 @@ function taxo_resolve(
                 candidates = candidates[exact, :]
                 candidate_lineages = candidate_lineages[exact]
             end
+            # A nominotypical subgenus or subspecies nested in a candidate of
+            # the same name is not a homonym.
+            outer = _outermost_candidates(candidate_lineages)
+            candidates = candidates[outer, :]
+            candidate_lineages = candidate_lineages[outer]
             preferred = _candidate_order(candidates.name)
             candidates = candidates[preferred, :]
             candidate_lineages = candidate_lineages[preferred]
@@ -1417,18 +1483,28 @@ function taxo_resolve(
     keys_ = String[_normalise_space(label) for label in labels]
     unique_keys = unique(keys_)
     resolved_unique = Dict{String,Any}()
-    for (index, key) in pairs(unique_keys)
-        resolved_unique[key] = resolve_one(key)
-        progress && println("Resolving taxa [$(index)/$(length(unique_keys))]: $(key)")
+    if source == "taxonomicon"
+        for (index, key) in pairs(unique_keys)
+            resolved_unique[key] = resolve_one(key)
+            progress && println("Resolving taxa [$(index)/$(length(unique_keys))]: $(key)")
+        end
+    else
+        records = _resolve_external(
+            unique_keys, source, within_clade, verbose, progress, failed_record,
+        )
+        for (key, record) in zip(unique_keys, records)
+            resolved_unique[key] = record
+        end
     end
     rows = [
         merge(_copy_resolution_row(resolved_unique[key]), (input=label,))
         for (label, key) in zip(labels, keys_)
     ]
+    metadata = _source_metadata(source)
     result = _make_resolution(
         rows;
-        source="The Taxonomicon",
-        source_url="http://taxonomicon.taxonomy.nl",
+        source=metadata.name,
+        source_url=metadata.url,
         with_ranks=true,
     )
 

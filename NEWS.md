@@ -1,3 +1,133 @@
+# Taxodist.jl 1.1.0
+
+## New taxonomic sources
+
+- `taxo_resolve()` and `taxo_bundle()` gain a `source` keyword. Besides The
+  Taxonomicon (`"taxonomicon"`, the default), lineages can be retrieved from
+  the Open Tree of Life reference taxonomy (`"ott"`) and the NCBI Taxonomy
+  (`"ncbi"`), through their public APIs, as in R. The resulting resolutions
+  work with every function that accepts one: `distance_matrix()`,
+  `cross_distances()`, `taxo_tree()`, `taxo_bundle()`, and, through the
+  matrix, `taxo_distinctness()`. Identifiers carry a source prefix
+  (`"ott:770309"`, `"ncbi:9606"`), ranks are recorded in the same form as for
+  The Taxonomicon, and the resolution and its bundles record the source and,
+  for the Open Tree Taxonomy, its version. Requests to each source are spaced
+  independently; NCBI requests respect its limit of three per second, or ten
+  with an API key (`NCBI_API_KEY` environment variable or
+  `Taxodist.NCBI_API_KEY[]`): they are spaced by at least 0.4 s (0.12 s with a
+  key), and refused requests (HTTP 429) are retried like server errors, while
+  other client errors are final. Shared fixtures (real API responses and the
+  expected resolutions, `test/fixtures/sources`) check R, Python, and Julia.
+  NCBI's XML is read by a small internal reader, so no dependency was added.
+- `taxo_sources()` lists the supported sources with their licence and
+  citation.
+- `compare_sources()` resolves the same taxa in several sources and reports
+  the lineage depth of every taxon in each, and the agreement between their
+  distance matrices (Spearman correlation and Mantel permutation test; pass
+  `rng` for reproducible p-values), i.e. how much an analysis depends on the
+  classification it is based on. It returns a `TaxodistSourceComparison`.
+
+## Community analyses
+
+- `taxo_dissimilarity()` computes the taxonomic dissimilarities Γ+ and Θ+ of
+  Clarke, Somerfield and Chapman (2006) between samples, returned as a
+  `TaxonomicDistanceMatrix` between samples whose new `method` field records
+  the index and whose `metric` records the metric of the taxon distances. They
+  credit closely related taxa as near matches, so samples without any taxon in
+  common can still be compared; on a flat classification they reduce to the
+  presence/absence Bray-Curtis (Sorensen) and Kulczynski dissimilarities, which
+  the tests verify. A shared fixture (`expected_community.json`) checks R,
+  Python, and Julia.
+- `taxo_ses()` computes the standardized effect sizes of the mean pairwise
+  distance (NRI) and the mean nearest-taxon distance (NTI) of Webb et al.
+  (2002) on taxonomic distances, under a species-pool null model or the
+  independent swap, optionally weighted by abundance as in the picante
+  package. It returns a `TaxodistSES`; pass `rng` for reproducible results.
+
+## Name resolution
+
+- A candidate nested in another candidate of the same name, such as the
+  nominotypical subgenus *Mus (Mus)* inside the genus *Mus*, is no longer
+  counted as a homonym, in `taxo_resolve()` and in name-based functions
+  (`get_taxonomicon_id()`, `get_lineage()`, ...), as in R. Such names are
+  therefore resolved instead of ambiguous, and no homonym warning is emitted
+  for them. The lineage is unchanged.
+
+## Performance
+
+- `distance_matrix()` and `cross_distances()`, and therefore `taxo_cluster()`,
+  `taxo_ordinate()`, `taxo_heatmap()`, `taxo_bundle()`, and
+  `taxo_distinctness()`, compute common-ancestor depths with a sorted index of
+  the lineages, as in R: in lexicographic order of the node identifiers, the
+  common prefix of two lineages is the minimum of the common prefixes of the
+  neighbouring lineages between them, so the depths from one taxon to all
+  others take two running minima instead of a node-by-node comparison of
+  every pair. Results are identical. On 5000 synthetic taxa a square matrix
+  takes about 0.22-0.25 s instead of 0.41-0.65 s, and a 2500 × 2500
+  `cross_distances()` 0.2 s instead of 1.7 s.
+
+## Clustering
+
+- `taxo_cluster()` uses a port of the Fortran routines of R's
+  `stats::hclust()` instead of Clustering.jl's `hclust()`, so merges, heights,
+  and leaf order equal R's for every method, also when distances are tied
+  (Clustering.jl matched R's heights but could order tied merges and leaves
+  differently). R's `"mcquitty"`, `"median"`, and `"centroid"` methods are now
+  available, and R's names (`"ward.D"`, `"ward.D2"`) are accepted alongside
+  `"ward_presquared"` and `"ward"`. The result is still a `Clustering.Hclust`
+  in the `hclust` field. `taxo_heatmap()` orders its rows with the same
+  algorithm (average linkage).
+
+## Bug fixes
+
+- The plain-text fallback parser, used for pages without the structured
+  hierarchy block, kept the no-break spaces that indent The Taxonomicon tree,
+  so rank labels were not removed and nodes such as `"Clade"` or `"Domain"`
+  could enter the lineage (the same bug as in R). Lines are now trimmed of
+  Unicode whitespace, and the shared fixture `expected_text_fallback.json`
+  (lineages and ranks) checks R, Python, and Julia.
+- Taxon names are normalized with Unicode whitespace (no-break space, thin
+  space, tabs, line breaks), trimmed and collapsed to one ASCII space, as in R.
+- `focal_distances()` gives a `missing` `mrca_depth` (R's `NA`) for a
+  community taxon that cannot be found, instead of 0.
+
+## Behavior changes
+
+- `metric` must be a single string (a single `Symbol` such as `:path` is still
+  accepted); vectors and other values are rejected with the same messages as
+  in R ("metric must be a single string, one of ...", "Unknown distance
+  metric ...").
+- `ambiguity` in `taxo_resolve()` and `taxo_bundle()` must be exactly
+  `"warn"`, `"first"`, or `"error"` (as in Python); other capitalizations are
+  no longer accepted.
+- `compare_bundles()` reports the metric of each bundle (`metric_old`,
+  `metric_new`) and whether it changed (`metric_changed`, also when the
+  `"ranked"` metric uses different rank levels); its display warns when the
+  distances are not comparable.
+- `taxo_distinctness()` returns a `TaxodistDistinctness`, displayed like R's
+  `print.taxodist_distinctness()`. Its `metric` and `data` fields, indexing by
+  name, and destructuring work as with the named tuple returned before.
+- The HTTP user agent follows a format shared by the three implementations:
+  `taxodist/<version> (Julia; +https://taxodist.github.io)`.
+
+## Documentation
+
+- The README and the new module docstring (`?Taxodist`) describe the three
+  taxonomic sources (how to choose one with `source=`, identifier prefixes,
+  request limits and the NCBI API key, `compare_sources()`), the community
+  functions, and cite The Taxonomicon, the Open Tree Taxonomy, and the NCBI
+  Taxonomy. The README links to the R and Python implementations, and its
+  examples of the community functions run offline.
+- Every exported name has a docstring (`clear_cache`, `taxo_search`, and
+  `summary_counts` had none). The docstrings of the name-based functions state
+  that names are looked up in The Taxonomicon and point to
+  `taxo_resolve(...; source=...)` for the other sources.
+- README and `CITATION.cff` point to the registered repository
+  (`https://github.com/rodrigosqrt3/Taxodist.jl`); the README installs the
+  registered package with `Pkg.add("Taxodist")`. `CITATION.cff` gains
+  `date-released`, `preferred-citation`, references for the three sources,
+  and the website `https://taxodist.github.io/`.
+
 # Taxodist.jl 1.0.0
 
 First stable release, matching taxodist 1.0.0 for R. The default distance
